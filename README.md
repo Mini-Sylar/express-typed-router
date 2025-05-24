@@ -22,6 +22,8 @@ pnpm add @minisylar/express-typed-router
 yarn add @minisylar/express-typed-router
 ```
 
+> **Note:** This package requires Express 4.18.0+ or Express 5.0.0+
+
 ## Quick Start
 
 ```javascript
