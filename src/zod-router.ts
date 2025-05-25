@@ -345,26 +345,52 @@ type IncrementWildcard<T extends string> = T extends "0"
   : "10"; // Reasonable limit for wildcards
 
 /**
- * Express middleware that adds custom properties to the request object.
+ * Express middleware that adds custom properties to the request object and/or response locals.
  *
- * @template T - The shape of the properties added to the request.
- * @param req - The Express request object, extended with T.
- * @param res - The Express response object.
+ * @template TReq - The shape of the properties added to the request object.
+ * @template TLocals - The shape of the properties added to response.locals.
+ * @param req - The Express request object, extended with TReq.
+ * @param res - The Express response object with typed locals.
  * @param next - The next middleware function.
  */
-export type TypedMiddleware<T extends Record<string, any>> = (
-  req: Request & T,
-  res: Response,
+export type TypedMiddleware<
+  TReq extends Record<string, any> = {},
+  TLocals extends Record<string, any> = {}
+> = (
+  req: Request & TReq,
+  res: Response<any, TLocals>,
   next: NextFunction
 ) => void | Promise<void>;
 
+/**
+ * Simplified TypedMiddleware for request-only extensions (backward compatibility)
+ */
+export type RequestOnlyMiddleware<TReq extends Record<string, any>> =
+  TypedMiddleware<TReq, {}>;
+
+/**
+ * Simplified TypedMiddleware for response locals-only extensions
+ */
+export type LocalsOnlyMiddleware<TLocals extends Record<string, any>> =
+  TypedMiddleware<{}, TLocals>;
+
 // Utility type to infer props from middleware array
-type InferMiddlewareProps<T extends readonly TypedMiddleware<any>[]> =
+type InferMiddlewareProps<T extends readonly TypedMiddleware<any, any>[]> =
   T extends readonly [infer First, ...infer Rest]
-    ? First extends TypedMiddleware<infer FirstType>
-      ? Rest extends readonly TypedMiddleware<any>[]
-        ? FirstType & InferMiddlewareProps<Rest>
-        : FirstType
+    ? First extends TypedMiddleware<infer FirstReq, any>
+      ? Rest extends readonly TypedMiddleware<any, any>[]
+        ? FirstReq & InferMiddlewareProps<Rest>
+        : FirstReq
+      : {}
+    : {};
+
+// Utility type to infer locals from middleware array
+type InferMiddlewareLocals<T extends readonly TypedMiddleware<any, any>[]> =
+  T extends readonly [infer First, ...infer Rest]
+    ? First extends TypedMiddleware<any, infer FirstLocals>
+      ? Rest extends readonly TypedMiddleware<any, any>[]
+        ? FirstLocals & InferMiddlewareLocals<Rest>
+        : FirstLocals
       : {}
     : {};
 
@@ -389,10 +415,11 @@ export type ZodRouteHandler<
   Path extends string = string,
   BodySchema extends ZodType<any, any, any> | unknown = unknown,
   QuerySchema extends ZodType<any, any, any> | unknown = unknown,
-  MiddlewareProps extends Record<string, any> = {}
+  MiddlewareProps extends Record<string, any> = {},
+  ResponseLocals extends Record<string, any> = {}
 > = (
   req: ZodRequest<Path, BodySchema, QuerySchema, MiddlewareProps>,
-  res: Response,
+  res: Response<any, ResponseLocals>,
   next?: NextFunction
 ) => void | Promise<void> | Response | Promise<Response>;
 
@@ -413,7 +440,7 @@ export interface RouteOptions<
   querySchema?: QuerySchema extends ZodType<any, any, any>
     ? QuerySchema
     : never;
-  middleware?: readonly TypedMiddleware<any>[];
+  middleware?: readonly TypedMiddleware<any, any>[];
 }
 
 // HTTP methods
@@ -428,37 +455,45 @@ export type HttpMethod =
   | "all";
 
 // Main typed router class
-export class TypedRouter<
-  RouterMiddlewareProps extends Record<string, any> = {}
+class TypedRouter<
+  RouterMiddlewareProps extends Record<string, any> = {},
+  RouterLocals extends Record<string, any> = {}
 > {
   private router: express.Router;
 
   constructor() {
     this.router = express.Router();
   }
-
   /**
    * Add typed middleware that extends the request with additional properties
+   * and/or adds properties to response.locals
    */
-  useTypedMiddleware<T extends Record<string, any>>(
-    middleware: TypedMiddleware<T>
-  ): TypedRouter<RouterMiddlewareProps & T> {
+  useTypedMiddleware<
+    TReq extends Record<string, any> = {},
+    TLocals extends Record<string, any> = {}
+  >(
+    middleware: TypedMiddleware<TReq, TLocals>
+  ): TypedRouter<RouterMiddlewareProps & TReq, RouterLocals & TLocals> {
     this.router.use(middleware as any);
     return this as any;
   }
-
   /**
    * Get the underlying Express router
    */
   getRouter(): express.Router {
     return this.router;
   }
-
   // Method overloads for GET requests with automatic middleware type inference
   get<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   get<
     Path extends string,
@@ -471,28 +506,33 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps
+      RouterMiddlewareProps,
+      RouterLocals
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Special overload for middleware type inference
-  get<Path extends string, Middleware extends readonly TypedMiddleware<any>[]>(
+  get<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
     path: Path,
     options: { middleware: Middleware },
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Combined overload for body/query schema + middleware
   get<
     Path extends string,
     BodySchema extends ZodType<any, any, any> | unknown,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema> & { middleware: Middleware },
@@ -500,25 +540,24 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
-
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   // Implementation
   get(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
   }
-
   // Combined overload for body/query schema + middleware (most specific first)
   post<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: {
@@ -530,15 +569,16 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Body schema only + middleware
   post<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: Middleware },
@@ -546,21 +586,26 @@ export class TypedRouter<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Middleware only
-  post<Path extends string, Middleware extends readonly TypedMiddleware<any>[]>(
+  post<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
     path: Path,
     options: { middleware: Middleware },
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Body + Query schema without middleware
   post<
@@ -574,30 +619,36 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps
+      RouterMiddlewareProps,
+      RouterLocals
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Just handler, no options
   post<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   post(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("post", path, optionsOrHandler, handler);
   }
-
   // PUT method with all the same overloads as POST
   put<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: {
@@ -609,14 +660,15 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   put<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: Middleware },
@@ -624,20 +676,25 @@ export class TypedRouter<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
-  put<Path extends string, Middleware extends readonly TypedMiddleware<any>[]>(
+  put<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
     path: Path,
     options: { middleware: Middleware },
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   put<
     Path extends string,
@@ -650,29 +707,34 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps
+      RouterMiddlewareProps,
+      RouterLocals
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   put<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
-
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   put(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("put", path, optionsOrHandler, handler);
   }
-
   // PATCH method with all the same overloads as POST
   patch<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: {
@@ -684,14 +746,15 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   patch<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: Middleware },
@@ -699,13 +762,14 @@ export class TypedRouter<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   patch<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { middleware: Middleware },
@@ -713,9 +777,10 @@ export class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   patch<
     Path extends string,
@@ -728,42 +793,33 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps
+      RouterMiddlewareProps,
+      RouterLocals
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   patch<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
-
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   patch(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("patch", path, optionsOrHandler, handler);
-  }
-
-  // DELETE method (typically no body, but can have query params and middleware)
-  delete<
-    Path extends string,
-    Middleware extends readonly TypedMiddleware<any>[]
-  >(
-    path: Path,
-    options: { middleware: Middleware },
-    handler: ZodRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
-    >
-  ): TypedRouter<RouterMiddlewareProps>;
-
+  } // DELETE method (typically no body, but can have query params and middleware)
+  // Most specific first: query schema + middleware
   delete<
     Path extends string,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { querySchema: QuerySchema; middleware: Middleware },
@@ -771,76 +827,66 @@ export class TypedRouter<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Query schema only
   delete<
     Path extends string,
     QuerySchema extends ZodType<any, any, any> | unknown
   >(
     path: Path,
     options: { querySchema: QuerySchema },
-    handler: ZodRouteHandler<Path, unknown, QuerySchema, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      QuerySchema,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Middleware only
+  delete<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
+    path: Path,
+    options: { middleware: Middleware },
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+
+  // Basic overload with no options
   delete<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
-
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   delete(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("delete", path, optionsOrHandler, handler);
-  }
-
-  // OPTIONS method (typically no body, used for CORS preflight)
+  } // OPTIONS method (typically no body, used for CORS preflight)
+  // Most specific first: query schema + middleware
   options<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any>[]
-  >(
-    path: Path,
-    options: { middleware: Middleware },
-    handler: ZodRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
-    >
-  ): TypedRouter<RouterMiddlewareProps>;
-
-  options<Path extends string>(
-    path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
-
-  options(
-    path: string,
-    optionsOrHandler: any,
-    handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
-    return this.registerRoute("options", path, optionsOrHandler, handler);
-  }
-
-  // HEAD method (like GET but only returns headers)
-  head<Path extends string, Middleware extends readonly TypedMiddleware<any>[]>(
-    path: Path,
-    options: { middleware: Middleware },
-    handler: ZodRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
-    >
-  ): TypedRouter<RouterMiddlewareProps>;
-
-  head<
-    Path extends string,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { querySchema: QuerySchema; middleware: Middleware },
@@ -848,38 +894,134 @@ export class TypedRouter<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Query schema only
+  options<
+    Path extends string,
+    QuerySchema extends ZodType<any, any, any> | unknown
+  >(
+    path: Path,
+    options: { querySchema: QuerySchema },
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      QuerySchema,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+
+  // Middleware only
+  options<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
+    path: Path,
+    options: { middleware: Middleware },
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+
+  // Basic overload with no options
+  options<Path extends string>(
+    path: Path,
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  options(
+    path: string,
+    optionsOrHandler: any,
+    handler?: any
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+    return this.registerRoute("options", path, optionsOrHandler, handler);
+  } // HEAD method (like GET but only returns headers)
+  // Most specific first: query schema + middleware
+  head<
+    Path extends string,
+    QuerySchema extends ZodType<any, any, any> | unknown,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
+    path: Path,
+    options: { querySchema: QuerySchema; middleware: Middleware },
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      QuerySchema,
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+
+  // Query schema only
   head<
     Path extends string,
     QuerySchema extends ZodType<any, any, any> | unknown
   >(
     path: Path,
     options: { querySchema: QuerySchema },
-    handler: ZodRouteHandler<Path, unknown, QuerySchema, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      QuerySchema,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Middleware only
+  head<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
+    path: Path,
+    options: { middleware: Middleware },
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+
+  // Basic overload with no options
   head<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
-
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   head(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("head", path, optionsOrHandler, handler);
-  }
-
-  // ALL method (matches all HTTP methods)
+  } // ALL method (matches all HTTP methods)
+  // Most specific first: body + query + middleware
   all<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: {
@@ -891,14 +1033,16 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Body schema + middleware (no query)
   all<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
-    Middleware extends readonly TypedMiddleware<any>[]
+    Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: Middleware },
@@ -906,21 +1050,29 @@ export class TypedRouter<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
-  all<Path extends string, Middleware extends readonly TypedMiddleware<any>[]>(
+  // Query schema + middleware (no body)
+  all<
+    Path extends string,
+    QuerySchema extends ZodType<any, any, any> | unknown,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { querySchema: QuerySchema; middleware: Middleware },
     handler: ZodRouteHandler<
       Path,
       unknown,
-      unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>
+      QuerySchema,
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Body + query schemas (no middleware)
   all<
     Path extends string,
     BodySchema extends ZodType<any, any, any> | unknown,
@@ -932,30 +1084,52 @@ export class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps
+      RouterMiddlewareProps,
+      RouterLocals
     >
-  ): TypedRouter<RouterMiddlewareProps>;
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
+  // Middleware only (no schemas)
+  all<
+    Path extends string,
+    Middleware extends readonly TypedMiddleware<any, any>[]
+  >(
+    path: Path,
+    options: { middleware: Middleware },
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
+      RouterLocals & InferMiddlewareLocals<Middleware>
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+
+  // Basic overload with no options
   all<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<Path, unknown, unknown, RouterMiddlewareProps>
-  ): TypedRouter<RouterMiddlewareProps>;
-
+    handler: ZodRouteHandler<
+      Path,
+      unknown,
+      unknown,
+      RouterMiddlewareProps,
+      RouterLocals
+    >
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   all(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("all", path, optionsOrHandler, handler);
   }
-
   // Helper method to register routes
   private registerRoute(
     method: HttpMethod,
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps> {
+  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     const middlewares: any[] = [];
 
     if (typeof optionsOrHandler === "object") {
@@ -1049,9 +1223,10 @@ export class TypedRouter<
  * app.use('/api', router.getRouter());
  */
 export function createTypedRouter<
-  RouterMiddlewareProps extends Record<string, any> = {}
->(): TypedRouter<RouterMiddlewareProps> {
-  return new TypedRouter<RouterMiddlewareProps>();
+  RouterMiddlewareProps extends Record<string, any> = {},
+  RouterLocals extends Record<string, any> = {}
+>(): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  return new TypedRouter<RouterMiddlewareProps, RouterLocals>();
 }
 
 // Option 2: Factory with optional configuration
@@ -1090,9 +1265,10 @@ export interface RouterConfig {
  * });
  */
 export function createTypedRouterWithConfig<
-  RouterMiddlewareProps extends Record<string, any> = {}
->(config?: RouterConfig): TypedRouter<RouterMiddlewareProps> {
-  const router = new TypedRouter<RouterMiddlewareProps>();
+  RouterMiddlewareProps extends Record<string, any> = {},
+  RouterLocals extends Record<string, any> = {}
+>(config?: RouterConfig): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  const router = new TypedRouter<RouterMiddlewareProps, RouterLocals>();
   if (config?.errorHandler) {
     router.getRouter().use(config.errorHandler);
   }
@@ -1115,7 +1291,7 @@ export function createTypedRouterWithConfig<
  * const router = createTypedRouterWithMiddleware(authMiddleware, loggingMiddleware);
  */
 export function createTypedRouterWithMiddleware<T extends Record<string, any>>(
-  ...middleware: TypedMiddleware<any>[]
+  ...middleware: TypedMiddleware<any, any>[]
 ): TypedRouter<T> {
   let router = new TypedRouter() as any;
   for (const mw of middleware) {
