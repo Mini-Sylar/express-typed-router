@@ -9,8 +9,8 @@
  * @example
  * // Example 1: Basic usage with router-level middleware
  * const router = createTypedRouter()
- *   .useTypedMiddleware(timestampMiddleware)
- *   .useTypedMiddleware(requestIdMiddleware)
+ *   .useMiddleware(timestampMiddleware)
+ *   .useMiddleware(requestIdMiddleware)
  *
  * router.get('/posts/:postId', (req, res) => {
  *   const { postId } = req.params // Typed as { postId: string }
@@ -35,7 +35,7 @@
  *
  * @example
  * // Example 3: Mixed middleware
- * const router = createTypedRouter().useTypedMiddleware(requestIdMiddleware)
+ * const router = createTypedRouter().useMiddleware(requestIdMiddleware)
  * router.get(
  *   '/posts/:postId',
  *   {
@@ -60,7 +60,7 @@
  *
  * @example
  * // Example 5: Demonstrating all HTTP methods
- * const router = createTypedRouter().useTypedMiddleware(requestIdMiddleware)
+ * const router = createTypedRouter().useMiddleware(requestIdMiddleware)
  *
  * // GET with query validation
  * router.get('/posts', { querySchema: QuerySchema }, (req, res) => {
@@ -440,7 +440,7 @@ export interface RouteOptions<
   querySchema?: QuerySchema extends ZodType<any, any, any>
     ? QuerySchema
     : never;
-  middleware?: readonly TypedMiddleware<any, any>[];
+  middleware?: TypedMiddleware<any, any>[];
 }
 
 // HTTP methods
@@ -467,8 +467,16 @@ class TypedRouter<
   /**
    * Add typed middleware that extends the request with additional properties
    * and/or adds properties to response.locals
+   */ /**
+   * Add typed middleware to the router.
+   * This middleware will apply to all routes defined after this call.
+   *
+   * @template TReq - Type extensions for the request object
+   * @template TLocals - Type extensions for response.locals
+   * @param middleware - The typed middleware function
+   * @returns A new router instance with updated types
    */
-  useTypedMiddleware<
+  useMiddleware<
     TReq extends Record<string, any> = {},
     TLocals extends Record<string, any> = {}
   >(
@@ -526,22 +534,21 @@ class TypedRouter<
       RouterLocals & InferMiddlewareLocals<Middleware>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
-
   // Combined overload for body/query schema + middleware
   get<
     Path extends string,
     BodySchema extends ZodType<any, any, any> | unknown,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: RouteOptions<BodySchema, QuerySchema> & { middleware: Middleware },
+    options: RouteOptions<BodySchema, QuerySchema> & { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
   // Implementation
@@ -551,26 +558,25 @@ class TypedRouter<
     handler?: any
   ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
-  }
-  // Combined overload for body/query schema + middleware (most specific first)
+  } // Combined overload for body/query schema + middleware (most specific first)
   post<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
     QuerySchema extends ZodType<any, any, any> | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
-      middleware: Middleware;
+      middleware: [...M]; // Using tuple spread pattern
     },
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -578,32 +584,32 @@ class TypedRouter<
   post<
     Path extends string,
     BodySchema extends ZodType<any, any, any>,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: Middleware },
+    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Middleware only
   post<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1295,7 +1301,7 @@ export function createTypedRouterWithMiddleware<T extends Record<string, any>>(
 ): TypedRouter<T> {
   let router = new TypedRouter() as any;
   for (const mw of middleware) {
-    router = router.useTypedMiddleware(mw);
+    router = router.useMiddleware(mw);
   }
   return router;
 }

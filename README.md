@@ -118,16 +118,28 @@ app.listen(3000);
 
 ### Global Middleware
 
+**Important**: Unlike Express, middleware must be applied using method chaining or capturing returned routers. See the [FAQ section](#faq-and-common-patterns) for details.
+
 ```typescript
+// Method chaining pattern (recommended)
 const router = createTypedRouter()
-  .useTypedMiddleware(authMiddleware)
-  .useTypedMiddleware(loggingMiddleware)
-  .useTypedMiddleware(timestampMiddleware);
+  .useMiddleware(authMiddleware)
+  .useMiddleware(loggingMiddleware)
+  .useMiddleware(timestampMiddleware);
 
 // All routes automatically get types from all middleware
 router.get("/protected", (req, res) => {
   // req.userId, req.requestId, req.timestamp all available and typed
 });
+
+// Alternative: capturing returned router
+const baseRouter = createTypedRouter();
+const routerWithMiddleware = baseRouter
+  .useMiddleware(authMiddleware)
+  .useMiddleware(loggingMiddleware);
+
+// Use the router with middleware applied
+routerWithMiddleware.get("/users", handler);
 ```
 
 ### Per-Route Middleware
@@ -136,7 +148,7 @@ router.get("/protected", (req, res) => {
 router.get(
   "/admin/:userId",
   {
-    middleware: [adminMiddleware, auditMiddleware] as const,
+    middleware: [adminMiddleware, auditMiddleware],
   },
   (req, res) => {
     // Types from both global AND per-route middleware are merged
@@ -191,13 +203,13 @@ app.use(express.json());
 
 // Create router and define middleware inline (automatically typed!)
 const router = createTypedRouter()
-  .useTypedMiddleware((req, res, next) => {
+  .useMiddleware((req, res, next) => {
     const token = req.headers.authorization;
     req.userId = "user123";
     req.isAdmin = token?.includes("admin") || false;
     next();
   })
-  .useTypedMiddleware((req, res, next) => {
+  .useMiddleware((req, res, next) => {
     req.requestId = Math.random().toString(36);
     console.log(`[${req.requestId}] ${req.method} ${req.path}`);
     next();
@@ -223,7 +235,7 @@ router.get(
   },
   (req, res) => {
     // All properties are automatically typed:
-    const { userId } = req.params;        // string (auto-inferred from route)
+    const { userId } = req.params; // string (auto-inferred from route)
     const { include, limit } = req.query; // from schema validation
     const { userId: authUserId, isAdmin, requestId } = req; // from middleware
 
@@ -266,19 +278,21 @@ router.post(
 router.delete(
   "/users/:userId",
   {
-    middleware: [(req, res, next) => {
-      if (!req.isAdmin) {
-        return res.status(403).json({ error: "Admin required" });
-      }
-      req.hasAdminAccess = true;
-      next();
-    }] as const,
+    middleware: [
+      (req, res, next) => {
+        if (!req.isAdmin) {
+          return res.status(403).json({ error: "Admin required" });
+        }
+        req.hasAdminAccess = true;
+        next();
+      },
+    ], // No need for 'as const' - middleware arrays are automatically typed
   },
   (req, res) => {
     // Types from BOTH global middleware AND per-route middleware
-    const { userId } = req.params;               // From route
+    const { userId } = req.params; // From route
     const { userId: authUserId, requestId } = req; // From global middleware
-    const { hasAdminAccess } = req;              // From per-route middleware
+    const { hasAdminAccess } = req; // From per-route middleware
 
     res.json({
       deleted: userId,
@@ -326,8 +340,8 @@ const loggingMiddleware: TypedMiddleware<{ requestId: string }> = (
 
 // Use the explicitly typed middleware
 const router = createTypedRouter()
-  .useTypedMiddleware(authMiddleware)
-  .useTypedMiddleware(loggingMiddleware);
+  .useMiddleware(authMiddleware)
+  .useMiddleware(loggingMiddleware);
 
 // Rest of the routes work the same way...
 ```
@@ -354,7 +368,7 @@ const authMiddleware: TypedMiddleware<{ userId: string; isAdmin: boolean }> = (
 };
 
 // Add to router - types are automatically merged
-router.useTypedMiddleware(authMiddleware);
+router.useMiddleware(authMiddleware);
 
 router.get("/protected", (req, res) => {
   // TypeScript knows about req.userId and req.isAdmin
@@ -381,7 +395,7 @@ const adminMiddleware: TypedMiddleware<{ hasAdminAccess: true }> = (
 router.get(
   "/admin/:userId",
   {
-    middleware: [adminMiddleware] as const,
+    middleware: [adminMiddleware], // No need for 'as const' - arrays are automatically typed
   },
   (req, res) => {
     // Types from BOTH global and per-route middleware are available
@@ -589,8 +603,8 @@ Creates a typed router instance with full flexibility for middleware and validat
 const router = createTypedRouter();
 
 // Add global middleware (chainable)
-router.useTypedMiddleware(middleware1)
-      .useTypedMiddleware(middleware2);
+router.useMiddleware(middleware1)
+      .useMiddleware(middleware2);
 
 // All HTTP methods supported
 router.get(path, options?, handler)
@@ -696,6 +710,177 @@ pnpm build:watch
 ## License
 
 ISC
+
+## FAQ and Common Patterns
+
+### Middleware Behavior Differences from Express
+
+#### IMPORTANT: Router Middleware and Route Registration
+
+When using middleware with `express-typed-router`, there's an important difference from standard Express behavior:
+
+**In Express**, middleware added with `router.use()` applies to all routes registered _after_ it:
+
+```javascript
+// Express middleware behavior
+const router = express.Router();
+router.use(authMiddleware); // Apply middleware
+router.get("/route1", handler1); // Has authMiddleware
+router.use(logMiddleware); // Apply another middleware
+router.get("/route2", handler2); // Has BOTH auth and log middleware
+```
+
+**In express-typed-router**, `useMiddleware()` returns a _new router instance_ for type safety:
+
+```typescript
+// ❌ WON'T WORK - middleware not applied to route
+const router = createTypedRouter();
+router.useMiddleware(authMiddleware); // Returns new router that isn't captured
+router.get("/route", handler); // Original router without middleware!
+
+// ✅ CORRECT - chain methods (recommended)
+const router = createTypedRouter()
+  .useMiddleware(authMiddleware)
+  .get("/route", handler);
+
+// ✅ CORRECT - chain directly from middleware call
+const router = createTypedRouter();
+router.useMiddleware(authMiddleware).get("/route", handler);
+
+// ✅ ALSO CORRECT - use per-route middleware
+const router = createTypedRouter();
+router.get("/route", { middleware: [authMiddleware] }, handler);
+```
+
+This design is necessary for full type safety but requires a different pattern than standard Express.
+
+### Common Express Patterns vs express-typed-router
+
+Here are common Express patterns and how to achieve them with express-typed-router:
+
+#### Pattern 1: Adding middleware to specific routes
+
+**Express:**
+
+```javascript
+const router = express.Router();
+router.get("/public", publicHandler);
+router.use(authMiddleware); // Only affects routes below
+router.get("/private", privateHandler); // Has authMiddleware
+```
+
+**express-typed-router:**
+
+```typescript
+// Option 1: Separate routers
+const publicRouter = createTypedRouter();
+publicRouter.get("/public", publicHandler);
+
+const privateRouter = createTypedRouter().useMiddleware(authMiddleware);
+privateRouter.get("/private", privateHandler);
+
+// Combine in Express
+app.use(publicRouter.getRouter());
+app.use(privateRouter.getRouter());
+
+// Option 2: Per-route middleware
+const router = createTypedRouter();
+router.get("/public", publicHandler);
+router.get("/private", { middleware: [authMiddleware] }, privateHandler);
+```
+
+#### Pattern 2: Adding middleware for a group of routes
+
+**Express:**
+
+```javascript
+const router = express.Router();
+router.get("/public", handler);
+
+// Only admin routes have auth middleware
+const adminRouter = express.Router();
+adminRouter.use(authMiddleware);
+adminRouter.get("/users", adminHandler1);
+adminRouter.get("/settings", adminHandler2);
+
+router.use("/admin", adminRouter);
+```
+
+**express-typed-router:**
+
+```typescript
+const publicRouter = createTypedRouter();
+publicRouter.get("/public", handler);
+
+// Admin router with middleware
+const adminRouter = createTypedRouter().useMiddleware(authMiddleware);
+adminRouter.get("/users", adminHandler1);
+adminRouter.get("/settings", adminHandler2);
+
+// Combine with Express
+app.use(publicRouter.getRouter());
+app.use("/admin", adminRouter.getRouter());
+```
+
+#### Pattern 3: Middleware with dynamically added routes
+
+**Express:**
+
+```javascript
+const router = express.Router();
+router.use(middleware);
+
+// Later, routes are added dynamically
+function addRoute(path, handler) {
+  router.get(path, handler); // Has middleware
+}
+```
+
+**express-typed-router:**
+
+```typescript
+// Option 1: Pass the router to the function
+const router = createTypedRouter().useMiddleware(middleware);
+
+function addRoute(router, path, handler) {
+  router.get(path, handler);
+}
+
+// Option 2: Factory function
+function createRouteAdder(middleware) {
+  const router = createTypedRouter().useMiddleware(middleware);
+
+  return {
+    addRoute: (path, handler) => router.get(path, handler),
+    getRouter: () => router.getRouter(),
+  };
+}
+
+const routeAdder = createRouteAdder(middleware);
+routeAdder.addRoute("/path", handler);
+app.use(routeAdder.getRouter());
+```
+
+### Using express-typed-router in JavaScript
+
+JavaScript users don't need to worry about TypeScript types but should still follow the middleware chaining pattern:
+
+```javascript
+// JavaScript usage
+const { createTypedRouter } = require("@minisylar/express-typed-router");
+
+const router = createTypedRouter().useMiddleware((req, res, next) => {
+  req.user = { id: "user123" };
+  next();
+});
+
+router.get("/users", (req, res) => {
+  // req.user is available but not typed (JavaScript doesn't have types)
+  res.json({ userId: req.user.id });
+});
+
+module.exports = router.getRouter();
+```
 
 ## Contributing
 

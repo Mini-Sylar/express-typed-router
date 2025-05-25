@@ -68,3 +68,4 @@ test-*.ts
 package-lock.json
 yarn.lock
 *.tgz
+examples/
