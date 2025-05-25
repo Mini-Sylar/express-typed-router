@@ -1,3 +1,9 @@
+## [1.1.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.0.1...v1.1.0) (2025-05-25)
+
+### Features
+
+* add typed response locals support to middleware and routes ([1484b2f](https://github.com/Mini-Sylar/express-typed-router/commit/1484b2fc919943d342d6d342700ac223b5e1b6d8))
+
 ## [1.0.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.0.0...v1.0.1) (2025-05-24)
 
 ### Bug Fixes
