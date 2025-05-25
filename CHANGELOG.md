@@ -1,3 +1,9 @@
+## [1.0.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.0.0...v1.0.1) (2025-05-24)
+
+### Bug Fixes
+
+* add Express version requirement note to installation section ([749240c](https://github.com/Mini-Sylar/express-typed-router/commit/749240ca0a370e79932344e20457949cbb65e7de))
+
 ## 1.0.0 (2025-05-24)
 
 ### Features
