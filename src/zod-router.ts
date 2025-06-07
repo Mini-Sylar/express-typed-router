@@ -145,6 +145,12 @@ import express, {
 } from "express";
 import { z, type ZodType } from "zod";
 
+// Compatibility layer for Zod v3/v4
+// This type works with both ZodType<Output, Def, Input> (v3) and ZodType<Output, Input> (v4)
+export type AnyZodType =
+  | ZodType<any, any, any> // Zod v3
+  | ZodType<any, any>; // Zod v4
+
 /**
  * Extract route parameters from Express.js route patterns.
  *
@@ -397,24 +403,20 @@ type InferMiddlewareLocals<T extends readonly TypedMiddleware<any, any>[]> =
 // Enhanced Request type with proper inference
 export type ZodRequest<
   Path extends string = string,
-  BodySchema extends ZodType<any, any, any> | unknown = unknown,
-  QuerySchema extends ZodType<any, any, any> | unknown = unknown,
+  BodySchema extends AnyZodType | unknown = unknown,
+  QuerySchema extends AnyZodType | unknown = unknown,
   MiddlewareProps extends Record<string, any> = {}
 > = Omit<Request, "params" | "query" | "body"> & {
   params: ExtractRouteParams<Path>;
-  body: BodySchema extends ZodType<any, any, any>
-    ? z.infer<BodySchema>
-    : unknown;
-  query: QuerySchema extends ZodType<any, any, any>
-    ? z.infer<QuerySchema>
-    : unknown;
+  body: BodySchema extends { _output: infer O } ? O : unknown;
+  query: QuerySchema extends { _output: infer O } ? O : unknown;
 } & MiddlewareProps;
 
 // Route handler type
 export type ZodRouteHandler<
   Path extends string = string,
-  BodySchema extends ZodType<any, any, any> | unknown = unknown,
-  QuerySchema extends ZodType<any, any, any> | unknown = unknown,
+  BodySchema extends AnyZodType | unknown = unknown,
+  QuerySchema extends AnyZodType | unknown = unknown,
   MiddlewareProps extends Record<string, any> = {},
   ResponseLocals extends Record<string, any> = {}
 > = (
@@ -433,13 +435,11 @@ export type ZodRouteHandler<
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
 export interface RouteOptions<
-  BodySchema extends ZodType<any, any, any> | unknown = unknown,
-  QuerySchema extends ZodType<any, any, any> | unknown = unknown
+  BodySchema extends AnyZodType | unknown = unknown,
+  QuerySchema extends AnyZodType | unknown = unknown
 > {
-  bodySchema?: BodySchema extends ZodType<any, any, any> ? BodySchema : never;
-  querySchema?: QuerySchema extends ZodType<any, any, any>
-    ? QuerySchema
-    : never;
+  bodySchema?: BodySchema;
+  querySchema?: QuerySchema;
   middleware?: TypedMiddleware<any, any>[];
 }
 
@@ -505,8 +505,8 @@ class TypedRouter<
 
   get<
     Path extends string,
-    BodySchema extends ZodType<any, any, any> | unknown,
-    QuerySchema extends ZodType<any, any, any> | unknown
+    BodySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyZodType | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
@@ -537,8 +537,8 @@ class TypedRouter<
   // Combined overload for body/query schema + middleware
   get<
     Path extends string,
-    BodySchema extends ZodType<any, any, any> | unknown,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    BodySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyZodType | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -561,8 +561,8 @@ class TypedRouter<
   } // Combined overload for body/query schema + middleware (most specific first)
   post<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    BodySchema extends AnyZodType,
+    QuerySchema extends AnyZodType | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -583,7 +583,7 @@ class TypedRouter<
   // Body schema only + middleware
   post<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
+    BodySchema extends AnyZodType,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -616,8 +616,8 @@ class TypedRouter<
   // Body + Query schema without middleware
   post<
     Path extends string,
-    BodySchema extends ZodType<any, any, any> | unknown,
-    QuerySchema extends ZodType<any, any, any> | unknown
+    BodySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyZodType | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
@@ -652,8 +652,8 @@ class TypedRouter<
   // PUT method with all the same overloads as POST
   put<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    BodySchema extends AnyZodType,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -673,7 +673,7 @@ class TypedRouter<
 
   put<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
+    BodySchema extends AnyZodType,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -704,8 +704,8 @@ class TypedRouter<
 
   put<
     Path extends string,
-    BodySchema extends ZodType<any, any, any> | unknown,
-    QuerySchema extends ZodType<any, any, any> | unknown
+    BodySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyZodType | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
@@ -738,8 +738,8 @@ class TypedRouter<
   // PATCH method with all the same overloads as POST
   patch<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    BodySchema extends AnyZodType,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -759,7 +759,7 @@ class TypedRouter<
 
   patch<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
+    BodySchema extends AnyZodType,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -790,8 +790,8 @@ class TypedRouter<
 
   patch<
     Path extends string,
-    BodySchema extends ZodType<any, any, any> | unknown,
-    QuerySchema extends ZodType<any, any, any> | unknown
+    BodySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyZodType | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
@@ -824,7 +824,7 @@ class TypedRouter<
   // Most specific first: query schema + middleware
   delete<
     Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -839,10 +839,7 @@ class TypedRouter<
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Query schema only
-  delete<
-    Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown
-  >(
+  delete<Path extends string, QuerySchema extends AnyZodType | unknown>(
     path: Path,
     options: { querySchema: QuerySchema },
     handler: ZodRouteHandler<
@@ -891,7 +888,7 @@ class TypedRouter<
   // Most specific first: query schema + middleware
   options<
     Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -906,10 +903,7 @@ class TypedRouter<
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Query schema only
-  options<
-    Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown
-  >(
+  options<Path extends string, QuerySchema extends AnyZodType | unknown>(
     path: Path,
     options: { querySchema: QuerySchema },
     handler: ZodRouteHandler<
@@ -958,7 +952,7 @@ class TypedRouter<
   // Most specific first: query schema + middleware
   head<
     Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -973,10 +967,7 @@ class TypedRouter<
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Query schema only
-  head<
-    Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown
-  >(
+  head<Path extends string, QuerySchema extends AnyZodType | unknown>(
     path: Path,
     options: { querySchema: QuerySchema },
     handler: ZodRouteHandler<
@@ -1025,8 +1016,8 @@ class TypedRouter<
   // Most specific first: body + query + middleware
   all<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    BodySchema extends AnyZodType,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -1047,7 +1038,7 @@ class TypedRouter<
   // Body schema + middleware (no query)
   all<
     Path extends string,
-    BodySchema extends ZodType<any, any, any>,
+    BodySchema extends AnyZodType,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -1064,7 +1055,7 @@ class TypedRouter<
   // Query schema + middleware (no body)
   all<
     Path extends string,
-    QuerySchema extends ZodType<any, any, any> | unknown,
+    QuerySchema extends AnyZodType | unknown,
     Middleware extends readonly TypedMiddleware<any, any>[]
   >(
     path: Path,
@@ -1081,8 +1072,8 @@ class TypedRouter<
   // Body + query schemas (no middleware)
   all<
     Path extends string,
-    BodySchema extends ZodType<any, any, any> | unknown,
-    QuerySchema extends ZodType<any, any, any> | unknown
+    BodySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyZodType | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
@@ -1170,17 +1161,20 @@ class TypedRouter<
 
     return this;
   }
-
-  private createBodyValidationMiddleware(schema: ZodType<any, any, any>) {
+  private createBodyValidationMiddleware(schema: AnyZodType) {
     return (req: Request, res: Response, next: NextFunction) => {
       try {
         req.body = schema.parse(req.body);
         next();
       } catch (error) {
-        if (error instanceof z.ZodError) {
+        // Check for ZodError from both v3 and v4 by looking for the issues/errors property
+        if (
+          error instanceof z.ZodError ||
+          (error && typeof error === "object" && "issues" in error)
+        ) {
           res.status(400).json({
             error: "Validation failed",
-            details: error.errors,
+            details: (error as any).errors || (error as any).issues,
           });
         } else {
           next(error);
@@ -1188,17 +1182,20 @@ class TypedRouter<
       }
     };
   }
-
-  private createQueryValidationMiddleware(schema: ZodType<any, any, any>) {
+  private createQueryValidationMiddleware(schema: AnyZodType) {
     return (req: Request, res: Response, next: NextFunction) => {
       try {
         req.query = schema.parse(req.query);
         next();
       } catch (error) {
-        if (error instanceof z.ZodError) {
+        // Check for ZodError from both v3 and v4 by looking for the issues/errors property
+        if (
+          error instanceof z.ZodError ||
+          (error && typeof error === "object" && "issues" in error)
+        ) {
           res.status(400).json({
             error: "Validation failed",
-            details: error.errors,
+            details: (error as any).errors || (error as any).issues,
           });
         } else {
           next(error);

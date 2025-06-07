@@ -69,3 +69,4 @@ package-lock.json
 yarn.lock
 *.tgz
 examples/
+src/zod-router-v3.ts

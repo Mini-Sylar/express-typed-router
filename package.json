@@ -53,20 +53,21 @@
   "homepage": "https://github.com/Mini-Sylar/express-typed-router#readme",
   "packageManager": "pnpm@10.11.0",
   "peerDependencies": {
-    "express": "^4.18.0 || ^5.0.0"
+    "express": "^4.18.0 || ^5.0.0",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
-    "@types/express": "^5.0.2",
+    "@types/express": "^5.0.3",
     "conventional-changelog-conventionalcommits": "^9.0.0",
     "rimraf": "^6.0.1",
     "semantic-release": "^24.2.5",
-    "tsdown": "^0.12.3",
+    "tsdown": "^0.12.7",
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "zod": "^3.25.28"
+    "zod": "^3.25.56"
   },
   "engines": {
     "node": ">=18.0.0"
