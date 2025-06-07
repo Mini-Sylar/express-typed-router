@@ -1,3 +1,9 @@
+## [1.4.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.3.0...v1.4.0) (2025-06-07)
+
+### Features
+
+* add support for both Zod v3 and v4 ([26c4de0](https://github.com/Mini-Sylar/express-typed-router/commit/26c4de0a937be129178f5b4f0abc6b87374437d3))
+
 ## [1.3.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.2.0...v1.3.0) (2025-06-07)
 
 ### Features
