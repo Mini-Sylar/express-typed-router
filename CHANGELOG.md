@@ -1,3 +1,9 @@
+## [1.3.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.2.0...v1.3.0) (2025-06-07)
+
+### Features
+
+* enhance Zod compatibility and update TypeScript configuration ([4765231](https://github.com/Mini-Sylar/express-typed-router/commit/476523183ba4a4a33e08877c161e1fa6a18d01b5))
+
 ## [1.2.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.1.0...v1.2.0) (2025-05-25)
 
 ### ⚠ BREAKING CHANGES
