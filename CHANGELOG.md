@@ -1,3 +1,16 @@
+## [1.2.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.1.0...v1.2.0) (2025-05-25)
+
+### ⚠ BREAKING CHANGES
+
+* useTypedMiddleware() has been renamed to useMiddleware() for
+a cleaner, more Express-like API. Additionally, middleware behavior now
+requires proper chaining for type safety - middleware must be chained with
+route handlers to ensure proper
+
+### Features
+
+* simplify API and improve middleware type inference ([a2a4c6e](https://github.com/Mini-Sylar/express-typed-router/commit/a2a4c6eb249ceab09759148ca53b2c71fc31c731))
+
 ## [1.1.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.0.1...v1.1.0) (2025-05-25)
 
 ### Features
