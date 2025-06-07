@@ -143,13 +143,73 @@ import express, {
   type Response,
   type NextFunction,
 } from "express";
-import { z, type ZodType } from "zod";
 
-// Compatibility layer for Zod v3/v4
-// This type works with both ZodType<Output, Def, Input> (v3) and ZodType<Output, Input> (v4)
-export type AnyZodType =
-  | ZodType<any, any, any> // Zod v3
-  | ZodType<any, any>; // Zod v4
+// Import from versioned subpaths as recommended by Zod docs
+import * as z3 from "zod/v3";
+import * as z4 from "zod/v4/core";
+
+// Compatibility layer for Zod v3/v4 following official recommendations
+export type AnyZodType = z3.ZodTypeAny | z4.$ZodType;
+
+// Type guard to detect Zod 4 schemas at runtime
+export function isZod4Schema(schema: AnyZodType): schema is z4.$ZodType {
+  return "_zod" in schema;
+}
+
+// Helper type to extract output type from either Zod version
+export type InferOutput<T extends AnyZodType> = T extends z4.$ZodType
+  ? z4.output<T>
+  : T extends z3.ZodTypeAny
+  ? z3.output<T>
+  : never;
+
+// Helper type to extract input type from either Zod version
+export type InferInput<T extends AnyZodType> = T extends z4.$ZodType
+  ? z4.input<T>
+  : T extends z3.ZodTypeAny
+  ? z3.input<T>
+  : never;
+
+// Unified parsing functions that work with both Zod 3 and 4
+export function parseSchema<T extends AnyZodType>(
+  schema: T,
+  data: unknown
+): InferOutput<T> {
+  if (isZod4Schema(schema)) {
+    return z4.parse(schema, data) as InferOutput<T>;
+  } else {
+    return (schema as z3.ZodTypeAny).parse(data) as InferOutput<T>;
+  }
+}
+
+// Safe parse result type that works with both versions
+export type SafeParseResult<T extends AnyZodType> = T extends z4.$ZodType
+  ? ReturnType<typeof z4.safeParse<T>>
+  : T extends z3.ZodTypeAny
+  ? z3.SafeParseReturnType<z3.input<T>, z3.output<T>>
+  : never;
+
+export function safeParseSchema<T extends AnyZodType>(
+  schema: T,
+  data: unknown
+): SafeParseResult<T> {
+  if (isZod4Schema(schema)) {
+    return z4.safeParse(schema, data) as SafeParseResult<T>;
+  } else {
+    return (schema as z3.ZodTypeAny).safeParse(data) as SafeParseResult<T>;
+  }
+}
+
+// Error detection helper
+export function isZodError(error: unknown): error is z3.ZodError {
+  return (
+    error instanceof z3.ZodError ||
+    (error !== null &&
+      typeof error === "object" &&
+      "issues" in error &&
+      Array.isArray((error as any).issues))
+  );
+}
 
 /**
  * Extract route parameters from Express.js route patterns.
@@ -408,8 +468,8 @@ export type ZodRequest<
   MiddlewareProps extends Record<string, any> = {}
 > = Omit<Request, "params" | "query" | "body"> & {
   params: ExtractRouteParams<Path>;
-  body: BodySchema extends { _output: infer O } ? O : unknown;
-  query: QuerySchema extends { _output: infer O } ? O : unknown;
+  body: BodySchema extends AnyZodType ? InferOutput<BodySchema> : unknown;
+  query: QuerySchema extends AnyZodType ? InferOutput<QuerySchema> : unknown;
 } & MiddlewareProps;
 
 // Route handler type
@@ -1164,14 +1224,11 @@ class TypedRouter<
   private createBodyValidationMiddleware(schema: AnyZodType) {
     return (req: Request, res: Response, next: NextFunction) => {
       try {
-        req.body = schema.parse(req.body);
+        req.body = parseSchema(schema, req.body);
         next();
       } catch (error) {
-        // Check for ZodError from both v3 and v4 by looking for the issues/errors property
-        if (
-          error instanceof z.ZodError ||
-          (error && typeof error === "object" && "issues" in error)
-        ) {
+        // Check for ZodError using our unified helper
+        if (isZodError(error)) {
           res.status(400).json({
             error: "Validation failed",
             details: (error as any).errors || (error as any).issues,
@@ -1185,14 +1242,11 @@ class TypedRouter<
   private createQueryValidationMiddleware(schema: AnyZodType) {
     return (req: Request, res: Response, next: NextFunction) => {
       try {
-        req.query = schema.parse(req.query);
+        req.query = parseSchema(schema, req.query);
         next();
       } catch (error) {
-        // Check for ZodError from both v3 and v4 by looking for the issues/errors property
-        if (
-          error instanceof z.ZodError ||
-          (error && typeof error === "object" && "issues" in error)
-        ) {
+        // Check for ZodError using our unified helper
+        if (isZodError(error)) {
           res.status(400).json({
             error: "Validation failed",
             details: (error as any).errors || (error as any).issues,

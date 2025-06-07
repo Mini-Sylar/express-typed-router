@@ -22,7 +22,31 @@ pnpm add @minisylar/express-typed-router
 yarn add @minisylar/express-typed-router
 ```
 
-> **Note:** This package requires Express 4.18.0+ or Express 5.0.0+
+> **Note:** This package requires Express 4.18.0+ or Express 5.0.0+ and Zod 3.25.0+
+
+### Zod Compatibility
+
+This library supports **both Zod 3 and Zod 4** simultaneously! The library follows [Zod's official recommendations for library authors](https://zod.dev/library-authors) and uses versioned imports internally to ensure compatibility with both versions.
+
+- ✅ **Zod v3.25.0+** - Full support
+- ✅ **Zod v4** - Full support including Core and Mini packages
+- 🔄 **Runtime detection** - Automatically detects and handles both versions
+
+You can use schemas from either version or mix them in the same application:
+
+```typescript
+// Works with Zod 4
+import { z } from "zod/v4";
+const userSchema = z.object({ name: z.string() });
+
+// Also works with Zod 3
+import * as z4 from "zod/v3";
+const postSchema = z4.object({ title: z4.string() });
+
+// Both schemas work seamlessly with the router
+router.post("/users", { bodySchema: userSchema }, handler);
+router.post("/posts", { bodySchema: postSchema }, handler);
+```
 
 ## Quick Start
 
