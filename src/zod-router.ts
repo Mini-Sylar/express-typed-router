@@ -1242,7 +1242,14 @@ class TypedRouter<
   private createQueryValidationMiddleware(schema: AnyZodType) {
     return (req: Request, res: Response, next: NextFunction) => {
       try {
-        req.query = parseSchema(schema, req.query);
+        const validatedQuery = parseSchema(schema, req.query);
+        // Use Object.defineProperty to properly set the read-only query property
+        Object.defineProperty(req, "query", {
+          value: validatedQuery,
+          writable: false,
+          enumerable: true,
+          configurable: true,
+        });
         next();
       } catch (error) {
         // Check for ZodError using our unified helper
