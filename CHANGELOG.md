@@ -1,3 +1,9 @@
+## [1.4.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.0...v1.4.1) (2025-06-08)
+
+### Bug Fixes
+
+* ensure query property is read-only after validation ([42a87c1](https://github.com/Mini-Sylar/express-typed-router/commit/42a87c1731cf79d5f01ae78821991059f4b7ec51))
+
 ## [1.4.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.3.0...v1.4.0) (2025-06-07)
 
 ### Features
