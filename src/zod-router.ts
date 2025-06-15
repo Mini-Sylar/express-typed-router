@@ -229,21 +229,31 @@ export type ExtractRouteParams<Path extends string> = string extends Path
   : ExtractParams<Path>;
 
 /**
- * Main parameter extraction logic - enhanced for Express 5 support
+ * Main parameter extraction logic - enhanced for Express 5 support with recursion depth limit
  */
-type ExtractParams<Path extends string> =
-  // Handle Express 5 braces for optional segments: {/:param} or {/path/:param}
+type ExtractParams<
+  Path extends string,
+  Depth extends readonly unknown[] = []
+> = Depth["length"] extends 15
+  ? Record<string, string> // Fallback to general record after 15 levels
+  : // Handle Express 5 braces for optional segments: {/:param} or {/path/:param}
   Path extends `${infer Before}{${infer OptionalContent}}${infer After}`
-    ? ExtractOptionalSegment<OptionalContent> &
-        ExtractParams<`${Before}${After}`>
-    : // Handle named parameters :paramName
-    Path extends `${infer _Before}:${infer Rest}`
-    ? ExtractSingleParam<Rest> & ExtractParams<RemoveFirstParam<Path>>
-    : // Handle wildcards *
-    Path extends `${infer _Before}*${infer After}`
-    ? { [K in CountWildcards<_Before>]: string } & ExtractParams<After>
-    : // No more parameters
-      {};
+  ? ExtractOptionalSegment<OptionalContent> &
+      ExtractParams<`${Before}${After}`, [...Depth, unknown]>
+  : // Handle named parameters :paramName
+  Path extends `${infer _Before}:${infer Rest}`
+  ? ExtractSingleParam<Rest> &
+      ExtractParams<
+        RemoveFirstParam<Path, [...Depth, unknown]>,
+        [...Depth, unknown]
+      >
+  : // Handle wildcards *
+  Path extends `${infer _Before}*${infer After}`
+  ? {
+      [K in CountWildcards<_Before, "0", [...Depth, unknown]>]: string;
+    } & ExtractParams<After, [...Depth, unknown]>
+  : // No more parameters
+    {};
 
 /**
  * Extract parameters from Express 5 optional segments in braces
@@ -335,56 +345,63 @@ type ExtractSingleParam<Rest extends string> =
  * Handles patterns like :from-:to by removing just :from and keeping -:to
  * Order matters: regex constraints must be handled before repeating parameters
  */
-type RemoveFirstParam<Path extends string> =
-  Path extends `${infer Before}:${infer Rest}`
-    ? // Handle regex constraints FIRST (before +, *, ?) to avoid conflicts
-      Rest extends `${infer _ParamName}(${infer _Constraint})${infer After}`
-      ? `${Before}${After}` // Handle consecutive parameters: :param-:nextParam -> -:nextParam
-      : Rest extends `${infer _ParamName}-:${infer After}`
-      ? `${Before}-:${After}`
-      : Rest extends `${infer _ParamName}.:${infer After}`
-      ? `${Before}.:${After}`
-      : // Handle optional parameters followed by delimiters (before regular delimiters)
-      Rest extends `${infer _ParamName}?/${infer After}`
-      ? `${Before}/${After}`
-      : Rest extends `${infer _ParamName}?-${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}?.${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}?#${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}?:${infer After}`
-      ? `${Before}:${After}`
-      : // Handle regular separators (after optional parameter patterns)
-      Rest extends `${infer _ParamName}/${infer After}`
-      ? `${Before}/${After}`
-      : Rest extends `${infer _ParamName}-${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}.${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}#${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}:${infer After}`
-      ? `${Before}:${After}`
-      : // Handle Express 5 repeating parameters (after regular separators)
-      Rest extends `${infer _ParamName}+${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}*${infer After}`
-      ? `${Before}${After}`
-      : // Handle optional parameters with ?
-      Rest extends `${infer _ParamName}?${infer After}`
-      ? `${Before}${After}`
-      : Before
-    : Path;
+type RemoveFirstParam<
+  Path extends string,
+  Depth extends readonly unknown[] = []
+> = Depth["length"] extends 15
+  ? Path // Stop recursion after 15 levels
+  : Path extends `${infer Before}:${infer Rest}`
+  ? // Handle regex constraints FIRST (before +, *, ?) to avoid conflicts
+    Rest extends `${infer _ParamName}(${infer _Constraint})${infer After}`
+    ? `${Before}${After}` // Handle consecutive parameters: :param-:nextParam -> -:nextParam
+    : Rest extends `${infer _ParamName}-:${infer After}`
+    ? `${Before}-:${After}`
+    : Rest extends `${infer _ParamName}.:${infer After}`
+    ? `${Before}.:${After}`
+    : // Handle optional parameters followed by delimiters (before regular delimiters)
+    Rest extends `${infer _ParamName}?/${infer After}`
+    ? `${Before}/${After}`
+    : Rest extends `${infer _ParamName}?-${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}?.${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}?#${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}?:${infer After}`
+    ? `${Before}:${After}`
+    : // Handle regular separators (after optional parameter patterns)
+    Rest extends `${infer _ParamName}/${infer After}`
+    ? `${Before}/${After}`
+    : Rest extends `${infer _ParamName}-${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}.${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}#${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}:${infer After}`
+    ? `${Before}:${After}`
+    : // Handle Express 5 repeating parameters (after regular separators)
+    Rest extends `${infer _ParamName}+${infer After}`
+    ? `${Before}${After}`
+    : Rest extends `${infer _ParamName}*${infer After}`
+    ? `${Before}${After}`
+    : // Handle optional parameters with ?
+    Rest extends `${infer _ParamName}?${infer After}`
+    ? `${Before}${After}`
+    : Before
+  : Path;
 
 /**
- * Count wildcards to assign proper numeric indices
+ * Count wildcards to assign proper numeric indices with recursion depth limit
  */
 type CountWildcards<
   Path extends string,
-  Count extends string = "0"
-> = Path extends `${infer _Before}*${infer Rest}`
-  ? CountWildcards<Rest, IncrementWildcard<Count>>
+  Count extends string = "0",
+  Depth extends readonly unknown[] = []
+> = Depth["length"] extends 15
+  ? Count // Stop counting after 15 levels of recursion
+  : Path extends `${infer _Before}*${infer Rest}`
+  ? CountWildcards<Rest, IncrementWildcard<Count>, [...Depth, unknown]>
   : Count;
 
 /**
@@ -440,25 +457,33 @@ export type RequestOnlyMiddleware<TReq extends Record<string, any>> =
 export type LocalsOnlyMiddleware<TLocals extends Record<string, any>> =
   TypedMiddleware<{}, TLocals>;
 
-// Utility type to infer props from middleware array
-type InferMiddlewareProps<T extends readonly TypedMiddleware<any, any>[]> =
-  T extends readonly [infer First, ...infer Rest]
-    ? First extends TypedMiddleware<infer FirstReq, any>
-      ? Rest extends readonly TypedMiddleware<any, any>[]
-        ? FirstReq & InferMiddlewareProps<Rest>
-        : FirstReq
-      : {}
-    : {};
+// Utility type to infer props from middleware array with recursion depth limit
+type InferMiddlewareProps<
+  T extends readonly TypedMiddleware<any, any>[],
+  Depth extends readonly unknown[] = []
+> = Depth["length"] extends 15
+  ? Record<string, any> // Fallback to any props after 15 levels
+  : T extends readonly [infer First, ...infer Rest]
+  ? First extends TypedMiddleware<infer FirstReq, any>
+    ? Rest extends readonly TypedMiddleware<any, any>[]
+      ? FirstReq & InferMiddlewareProps<Rest, [...Depth, unknown]>
+      : FirstReq
+    : {}
+  : {};
 
-// Utility type to infer locals from middleware array
-type InferMiddlewareLocals<T extends readonly TypedMiddleware<any, any>[]> =
-  T extends readonly [infer First, ...infer Rest]
-    ? First extends TypedMiddleware<any, infer FirstLocals>
-      ? Rest extends readonly TypedMiddleware<any, any>[]
-        ? FirstLocals & InferMiddlewareLocals<Rest>
-        : FirstLocals
-      : {}
-    : {};
+// Utility type to infer locals from middleware array with recursion depth limit
+type InferMiddlewareLocals<
+  T extends readonly TypedMiddleware<any, any>[],
+  Depth extends readonly unknown[] = []
+> = Depth["length"] extends 15
+  ? Record<string, any> // Fallback to any locals after 15 levels
+  : T extends readonly [infer First, ...infer Rest]
+  ? First extends TypedMiddleware<any, infer FirstLocals>
+    ? Rest extends readonly TypedMiddleware<any, any>[]
+      ? FirstLocals & InferMiddlewareLocals<Rest, [...Depth, unknown]>
+      : FirstLocals
+    : {}
+  : {};
 
 // Enhanced Request type with proper inference
 export type ZodRequest<
