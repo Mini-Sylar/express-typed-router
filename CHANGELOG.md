@@ -1,3 +1,9 @@
+## [1.4.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.1...v1.4.2) (2025-06-15)
+
+### Bug Fixes
+
+* add recursion depth limits for TypeScript 5.4+ compatibility ([6c4546a](https://github.com/Mini-Sylar/express-typed-router/commit/6c4546a83162787f3e43802591aa4625668f43a5))
+
 ## [1.4.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.0...v1.4.1) (2025-06-08)
 
 ### Bug Fixes
