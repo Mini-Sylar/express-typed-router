@@ -1,3 +1,9 @@
+## [1.4.3](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.2...v1.4.3) (2025-06-16)
+
+### Bug Fixes
+
+* support deep recursive types and remove type depth limits\n\n- Allow inference for deeply nested, Zod-like schemas (e.g. drizzle-zod)\n- Remove all artificial recursion depth limits from type helpers\n- Ensures compatibility with complex Zod-like schemas ([b16be27](https://github.com/Mini-Sylar/express-typed-router/commit/b16be276ed1615e4b02ab727abd18fe08661d60d))
+
 ## [1.4.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.1...v1.4.2) (2025-06-15)
 
 ### Bug Fixes
