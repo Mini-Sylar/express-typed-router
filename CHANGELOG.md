@@ -1,3 +1,9 @@
+## [1.4.4](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.3...v1.4.4) (2025-07-13)
+
+### Bug Fixes
+
+* Update zod compatibility with v3 and v4 stable ([5e71e1d](https://github.com/Mini-Sylar/express-typed-router/commit/5e71e1d3bd6cbf6d2bfb9c377702ea41cb6fe5a9))
+
 ## [1.4.3](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.2...v1.4.3) (2025-06-16)
 
 ### Bug Fixes
