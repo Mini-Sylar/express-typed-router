@@ -493,7 +493,13 @@ export type ZodRouteHandler<
   req: ZodRequest<Path, BodySchema, QuerySchema, MiddlewareProps>,
   res: Response<any, ResponseLocals>,
   next?: NextFunction
-) => void | Promise<void> | Response | Promise<Response>;
+) =>
+  | void
+  | undefined
+  | Promise<void | undefined>
+  | Response
+  | Promise<Response>
+  | Promise<Response | undefined>;
 
 /**
  * Options for defining a typed route, including schemas and middleware.
@@ -724,51 +730,51 @@ class TypedRouter<
     Path extends string,
     BodySchema extends AnyZodType,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
-      middleware: Middleware;
+      middleware: [...M]; // Using tuple spread pattern
     },
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   put<
     Path extends string,
     BodySchema extends AnyZodType,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: Middleware },
+    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   put<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -810,51 +816,51 @@ class TypedRouter<
     Path extends string,
     BodySchema extends AnyZodType,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
-      middleware: Middleware;
+      middleware: [...M]; // Using tuple spread pattern
     },
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   patch<
     Path extends string,
     BodySchema extends AnyZodType,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: Middleware },
+    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   patch<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -895,16 +901,16 @@ class TypedRouter<
   delete<
     Path extends string,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: Middleware },
+    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -924,16 +930,16 @@ class TypedRouter<
   // Middleware only
   delete<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -959,16 +965,16 @@ class TypedRouter<
   options<
     Path extends string,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: Middleware },
+    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -988,16 +994,16 @@ class TypedRouter<
   // Middleware only
   options<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1023,16 +1029,16 @@ class TypedRouter<
   head<
     Path extends string,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: Middleware },
+    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1052,16 +1058,16 @@ class TypedRouter<
   // Middleware only
   head<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1088,20 +1094,20 @@ class TypedRouter<
     Path extends string,
     BodySchema extends AnyZodType,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
-      middleware: Middleware;
+      middleware: [...M]; // Using tuple spread pattern
     },
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1109,16 +1115,16 @@ class TypedRouter<
   all<
     Path extends string,
     BodySchema extends AnyZodType,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: Middleware },
+    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1126,16 +1132,16 @@ class TypedRouter<
   all<
     Path extends string,
     QuerySchema extends AnyZodType | unknown,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: Middleware },
+    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
@@ -1159,16 +1165,16 @@ class TypedRouter<
   // Middleware only (no schemas)
   all<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: Middleware },
+    options: { middleware: [...M] }, // Using tuple spread pattern
     handler: ZodRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      RouterLocals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
