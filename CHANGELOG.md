@@ -1,3 +1,13 @@
+## [1.5.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.4...v1.5.0) (2025-08-10)
+
+### ⚠ BREAKING CHANGES
+
+* None - all changes are backward compatible enhancements
+
+### Features
+
+* enhance route handler return type support and upgrade build tooling ([e72c0a3](https://github.com/Mini-Sylar/express-typed-router/commit/e72c0a31d277168e0380d678e9cd63fcaa7bec3c))
+
 ## [1.4.4](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.3...v1.4.4) (2025-07-13)
 
 ### Bug Fixes
