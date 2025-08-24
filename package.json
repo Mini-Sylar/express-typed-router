@@ -3,14 +3,14 @@
   "version": "1.4.4",
   "description": "A strongly-typed Express router with Zod validation and automatic type inference for params, body, query, and middleware",
   "type": "module",
-  "main": "dist/zod-router.cjs",
-  "module": "dist/zod-router.js",
-  "types": "dist/zod-router.d.ts",
+  "main": "dist/schema-router.cjs",
+  "module": "dist/schema-router.js",
+  "types": "dist/schema-router.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/zod-router.js",
-      "require": "./dist/zod-router.cjs",
-      "types": "./dist/zod-router.d.ts"
+      "import": "./dist/schema-router.js",
+      "require": "./dist/schema-router.cjs",
+      "types": "./dist/schema-router.d.ts"
     }
   },
   "files": [
@@ -36,10 +36,20 @@
     "router",
     "typescript",
     "zod",
+    "yup",
+    "effect",
+    "joi",
+    "valibot",
+    "arktype",
+    "decoders",
+    "ts.data.json",
+    "unhoax",
     "validation",
     "middleware",
     "type-safe",
-    "strongly-typed"
+    "strongly-typed",
+    "schema",
+    "standard schema"
   ],
   "author": "Mini-Sylar",
   "license": "MIT",
@@ -53,8 +63,11 @@
   "homepage": "https://github.com/Mini-Sylar/express-typed-router#readme",
   "packageManager": "pnpm@10.11.0",
   "peerDependencies": {
-    "express": "^4.18.0 || ^5.0.0",
-    "zod": "^3.25.0 || ^4.0.0"
+    "express": "^4.18.0 || ^5.0.0"
+  },
+  "dependencies": {
+    "@standard-schema/spec": "^1.0.0",
+    "@standard-schema/utils": "^0.3.0"
   },
   "devDependencies": {
     "@semantic-release/changelog": "^6.0.3",
@@ -63,9 +76,8 @@
     "conventional-changelog-conventionalcommits": "^9.1.0",
     "rimraf": "^6.0.1",
     "semantic-release": "^24.2.7",
-    "tsdown": "^0.14.0",
-    "typescript": "^5.8.3",
-    "zod": "^3.25.76"
+    "tsdown": "^0.14.1",
+    "typescript": "^5.9.2"
   },
   "engines": {
     "node": ">=18.0.0"
