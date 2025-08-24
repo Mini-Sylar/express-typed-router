@@ -1,3 +1,9 @@
+## [1.6.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.5.0...v1.6.0) (2025-08-24)
+
+### Features
+
+* **schema:** migrate router to Standard Schema runtime and generic schema adapters ([6bcdc94](https://github.com/Mini-Sylar/express-typed-router/commit/6bcdc9410c52470ba4eabb95f54f55097e4b2a87))
+
 ## [1.5.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.4.4...v1.5.0) (2025-08-10)
 
 ### ⚠ BREAKING CHANGES
