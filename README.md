@@ -1,11 +1,13 @@
 # @minisylar/express-typed-router
 
-A strongly-typed Express router with Zod validation and automatic type inference for params, body, query, and middleware.
+A strongly-typed Express router with schema validation and automatic type inference for params, body, query, and middleware.
 
 ## Features
 
 - 🚀 **Full TypeScript support** with automatic type inference for route parameters
-- 🛡️ **Zod validation** for request body, query parameters, and route params
+- 🛡️ **Schema validation** for request body, query parameters, and route params (Zod, Yup, Valibot, Arktype,Joi,Effect,decoders,
+  ts.data.json,
+  unhoax, etc.)
 - 🔗 **Express.js compatibility** - works with Express 4 and Express 5
 - 🤝 **Mix with existing Express routes** - seamlessly integrates with your current codebase
 - 📝 **JSDoc documentation** with comprehensive examples
@@ -22,31 +24,52 @@ pnpm add @minisylar/express-typed-router
 yarn add @minisylar/express-typed-router
 ```
 
-> **Note:** This package requires Express 4.18.0+ or Express 5.0.0+ and Zod 3.25.0+
+> **Note:** This package requires Express 4.18.0+ or Express 5.0.0+. For schema validation the library works with multiple popular schema libraries (examples below).
 
-### Zod Compatibility
+### Schema Compatibility
 
-This library supports **both Zod 3 and Zod 4** simultaneously! The library follows [Zod's official recommendations for library authors](https://zod.dev/library-authors) and uses versioned imports internally to ensure compatibility with both versions.
+This library is schema-agnostic: it provides a validation plumbing that works with multiple popular schema libraries. Below are short examples showing how you can use different schema libraries with the router. The router expects a schema-like object that can validate input; most adapters are straightforward.
 
-- ✅ **Zod v3.25.0+** - Full support
-- ✅ **Zod v4** - Full support including Core and Mini packages
-- 🔄 **Runtime detection** - Automatically detects and handles both versions
-
-You can use schemas from either version or mix them in the same application:
+Example with Zod (v3 or v4):
 
 ```typescript
-// Works with Zod 4
-import { z } from "zod/v4";
+import { z } from "zod"; // or "zod/v4" or "zod/v3" as needed
 const userSchema = z.object({ name: z.string() });
-
-// Also works with Zod 3
-import * as z4 from "zod/v3";
-const postSchema = z4.object({ title: z4.string() });
-
-// Both schemas work seamlessly with the router
 router.post("/users", { bodySchema: userSchema }, handler);
-router.post("/posts", { bodySchema: postSchema }, handler);
 ```
+
+Example with Yup:
+
+```javascript
+import * as yup from "yup";
+const userSchema = yup.object({ name: yup.string().required() });
+// pass the yup schema directly as bodySchema; the router will run validation
+router.post("/users", { bodySchema: userSchema }, handler);
+```
+
+Example with Valibot (valibot):
+
+```typescript
+import { object, string } from "valibot";
+const userSchema = object({ name: string() });
+router.post("/users", { bodySchema: userSchema }, handler);
+```
+
+Example with Arktype:
+
+```typescript
+import { object, string } from "arktype";
+const userSchema = object({ name: string() });
+router.post("/users", { bodySchema: userSchema }, handler);
+```
+
+If a schema library needs an adapter (for example to map its errors to the router's error format), add a small wrapper that runs validation and throws the expected error shape. See the project's examples for concrete adapter patterns.
+
+Note about Joi: Joi's TypeScript typings do not reliably infer the output type from the runtime schema shape. When using Joi you should either:
+
+- provide an explicit generic type for the schema (e.g. `Joi.object<MyType>(...)`),
+- add a variable type annotation (e.g. `const s: Joi.ObjectSchema<MyType> = Joi.object(...)`), or
+- write a small adapter that validates at runtime and exposes a typed result to TypeScript.
 
 ## Quick Start
 

@@ -4,7 +4,7 @@
  *
  * @title @minisylar/express-typed-router
  *
- * A strongly-typed Express router with Zod validation and automatic type inference for params, body, query, and middleware.
+ * A strongly-typed Express router with Standard Schema validation and automatic type inference for params, body, query, and middleware.
  *
  * @example
  * // Example 1: Basic usage with router-level middleware
@@ -144,78 +144,148 @@ import express, {
   type NextFunction,
 } from "express";
 
-// Import from versioned subpaths as recommended by Zod docs
-import * as z3 from "zod/v3";
-import * as z4 from "zod/v4/core";
+// Use the official Standard Schema types and utils so consumers can pass
+// zod/joi/valibot schemas directly (they already implement the spec).
+import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { SchemaError } from "@standard-schema/utils";
 
-// Compatibility layer for Zod v3/v4 following official recommendations
-export type AnyZodType = z3.ZodTypeAny | z4.$ZodType;
+// Any schema compatible with the Standard Schema v1 spec
+export type AnyStandardSchema = StandardSchemaV1<any, any>;
 
-// Type guard to detect Zod 4 schemas at runtime
-export function isZod4Schema(schema: AnyZodType): schema is z4.$ZodType {
-  return "_zod" in schema;
-}
+// The router expects consumers to pass runtime objects that implement the
+// Standard Schema v1 interface (i.e. expose `schema['~standard'].validate`).
+// We do not add runtime shims or adapters here — upstream libraries should
+// implement the Standard Schema runtime shape themselves (see vee-validate
+// for the minimal `isStandardSchema` check used in the ecosystem).
 
-// Helper type to extract output type from Zod v3, v4, drizzle-zod, or fallback to unknown
-export type InferOutput<T> = T extends z4.$ZodType
-  ? z4.output<T>
-  : T extends z3.ZodTypeAny
-  ? z3.output<T>
-  : T extends { _output: infer O }
-  ? O
-  : T extends { _type: infer O }
-  ? O
+// We'll remove this alias after all occurrences are replaced with `AnyStandardSchema`.
+
+// Helper type to extract output/input types from a Standard Schema
+export type InferOutput<T> = T extends StandardSchemaV1
+  ? StandardSchemaV1.InferOutput<T>
+  : unknown;
+export type InferInput<T> = T extends StandardSchemaV1
+  ? StandardSchemaV1.InferInput<T>
   : unknown;
 
-// Helper type to extract input type from Zod v3, v4, drizzle-zod, or fallback to unknown
-export type InferInput<T> = T extends z4.$ZodType
-  ? z4.input<T>
-  : T extends z3.ZodTypeAny
-  ? z3.input<T>
-  : T extends { _input: infer I }
-  ? I
-  : T extends { _type: infer I }
-  ? I
-  : unknown;
-
-// Unified parsing functions that work with both Zod 3 and 4
-export function parseSchema<T extends AnyZodType>(
-  schema: T,
-  data: unknown
-): InferOutput<T> {
-  if (isZod4Schema(schema)) {
-    return z4.parse(schema, data) as InferOutput<T>;
-  } else {
-    return (schema as z3.ZodTypeAny).parse(data) as InferOutput<T>;
-  }
+// Try to infer output from Zod-like `safeParse` / `parse` shapes
+// Prefer `safeParse` (Zod) then `parse` (Zod parse). Produce `never` when not present.
+type InferFromSafeParse<T> = T extends {
+  safeParse: (...args: any[]) => infer R;
 }
-
-// Safe parse result type that works with both versions
-export type SafeParseResult<T extends AnyZodType> = T extends z4.$ZodType
-  ? ReturnType<typeof z4.safeParse<T>>
-  : T extends z3.ZodTypeAny
-  ? z3.SafeParseReturnType<z3.input<T>, z3.output<T>>
+  ? R extends { success: true; data: infer O }
+    ? O
+    : R extends Promise<infer PR>
+    ? PR extends { success: true; data: infer O }
+      ? O
+      : never
+    : never
+  : T extends { parse: (...args: any[]) => infer R }
+  ? R
   : never;
 
-export function safeParseSchema<T extends AnyZodType>(
+// Canonical inference used by the router: prefer Standard Schema inference,
+// otherwise fall back to Zod-like (`safeParse`/`parse`). We deliberately
+// do NOT attempt structural inference from `validate()` return shapes (Joi)
+// because many libraries (notably Joi) do not provide reliable TS inference.
+export type InferSchemaOutput<T> = T extends StandardSchemaV1
+  ? StandardSchemaV1.InferOutput<T>
+  : InferFromSafeParse<T>;
+
+// Canonical inference used by the router: prefer Standard Schema inference,
+// otherwise fall back to `validate`-based structural inference.
+// (kept expanded InferSchemaOutput defined later)
+
+// Parse using the Standard Schema `~standard.validate()` API.
+// This helper is synchronous and will throw on validation failures.
+export function parseSchema<T>(schema: T, data: unknown): InferSchemaOutput<T> {
+  const anySchema: any = schema;
+
+  if (
+    anySchema &&
+    anySchema["~standard"] &&
+    typeof anySchema["~standard"].validate === "function"
+  ) {
+    const result = anySchema["~standard"].validate(data);
+    if (result instanceof Promise) {
+      throw new TypeError(
+        "Async schema validation is not supported by parseSchema"
+      );
+    }
+    if (result.issues) {
+      throw new SchemaError(result.issues as any);
+    }
+    return result.value as InferSchemaOutput<T>;
+  }
+
+  throw new TypeError("Unsupported schema shape for parseSchema");
+}
+
+// Safe parse returns a union covering common validator shapes (Standard Schema, Zod, Joi/valibot)
+export type SafeParseResult<T> =
+  | StandardSchemaV1.Result<InferSchemaOutput<T>>
+  | { value: InferSchemaOutput<T> }
+  | { issues: any[] }
+  | Promise<
+      | StandardSchemaV1.Result<InferSchemaOutput<T>>
+      | { value: InferSchemaOutput<T> }
+      | { issues: any[] }
+    >;
+
+export function safeParseSchema<T>(
   schema: T,
   data: unknown
 ): SafeParseResult<T> {
-  if (isZod4Schema(schema)) {
-    return z4.safeParse(schema, data) as SafeParseResult<T>;
-  } else {
-    return (schema as z3.ZodTypeAny).safeParse(data) as SafeParseResult<T>;
+  // At runtime we only accept Standard Schema-compatible objects that expose
+  // `schema['~standard'].validate`. This keeps runtime behavior strict and
+  // predictable; type-level inference still attempts to extract types from
+  // common schema shapes (safeParse/parse/validate) for developer ergonomics.
+  const anySchema: any = schema;
+  if (
+    anySchema &&
+    anySchema["~standard"] &&
+    typeof anySchema["~standard"].validate === "function"
+  ) {
+    return anySchema["~standard"].validate(data) as SafeParseResult<T>;
   }
+
+  // Fallbacks below are kept for broader type compatibility in TS inference,
+  // but they are not a substitute for a runtime `~standard` implementation.
+  if (anySchema && typeof anySchema.safeParse === "function") {
+    return anySchema.safeParse(data) as any;
+  }
+  if (anySchema && typeof anySchema.parse === "function") {
+    try {
+      const v = anySchema.parse(data);
+      return { value: v } as any;
+    } catch (err: any) {
+      return { issues: [{ message: err?.message ?? String(err) }] } as any;
+    }
+  }
+  if (anySchema && typeof anySchema.validate === "function") {
+    const r = anySchema.validate(data);
+    if (r && r.then && typeof r.then === "function") {
+      return r.then((res: any) => {
+        if (res.error) return { issues: [{ message: res.error.message }] };
+        if (res.issues) return { issues: res.issues };
+        return { value: res.value ?? res };
+      });
+    }
+    if (r && r.error) return { issues: [{ message: r.error.message }] } as any;
+    if (r && r.issues) return { issues: r.issues } as any;
+    return { value: r.value ?? r } as any;
+  }
+  return { issues: [{ message: "Unsupported schema shape" }] } as any;
 }
 
 // Error detection helper
-export function isZodError(error: unknown): error is z3.ZodError {
+export function isSchemaError(error: unknown): error is { issues: any[] } {
+  // Standard Schema failure objects expose an `issues` array. Accept that shape.
   return (
-    error instanceof z3.ZodError ||
-    (error !== null &&
-      typeof error === "object" &&
-      "issues" in error &&
-      Array.isArray((error as any).issues))
+    error !== null &&
+    typeof error === "object" &&
+    "issues" in error &&
+    Array.isArray((error as any).issues)
   );
 }
 
@@ -227,7 +297,7 @@ export function isZodError(error: unknown): error is z3.ZodError {
  * - Multiple parameters: /users/:userId/books/:bookId → { userId: string; bookId: string }
  * - Parameters with separators: /flights/:from-:to → { from: string; to: string }
  * - Dot notation: /plantae/:genus.:species → { genus: string; species: string }
- * - Regex constraints: /user/:id(\\d+) → { id: string }
+ * - Regex constraints: /user/:id(\d+) → { id: string }
  * - Optional parameters: /posts/:year/:month? → { year: string; month?: string }
  * - Wildcard parameters: /files/* → { "0": string }
  * - Multiple wildcards: /a/star/b/star → { "0": string; "1": string }
@@ -471,26 +541,26 @@ type InferMiddlewareLocals<T extends readonly TypedMiddleware<any, any>[]> =
     : {};
 
 // Enhanced Request type with proper inference
-export type ZodRequest<
+export type SchemaRequest<
   Path extends string = string,
-  BodySchema extends AnyZodType | unknown = unknown,
-  QuerySchema extends AnyZodType | unknown = unknown,
+  BodySchema extends AnyStandardSchema | unknown = unknown,
+  QuerySchema extends AnyStandardSchema | unknown = unknown,
   MiddlewareProps extends Record<string, any> = {}
 > = Omit<Request, "params" | "query" | "body"> & {
   params: ExtractRouteParams<Path>;
-  body: BodySchema extends AnyZodType ? InferOutput<BodySchema> : unknown;
-  query: QuerySchema extends AnyZodType ? InferOutput<QuerySchema> : unknown;
+  body: BodySchema extends unknown ? InferSchemaOutput<BodySchema> : unknown;
+  query: QuerySchema extends unknown ? InferSchemaOutput<QuerySchema> : unknown;
 } & MiddlewareProps;
 
 // Route handler type
-export type ZodRouteHandler<
+export type SchemaRouteHandler<
   Path extends string = string,
-  BodySchema extends AnyZodType | unknown = unknown,
-  QuerySchema extends AnyZodType | unknown = unknown,
+  BodySchema extends AnyStandardSchema | unknown = unknown,
+  QuerySchema extends AnyStandardSchema | unknown = unknown,
   MiddlewareProps extends Record<string, any> = {},
   ResponseLocals extends Record<string, any> = {}
 > = (
-  req: ZodRequest<Path, BodySchema, QuerySchema, MiddlewareProps>,
+  req: SchemaRequest<Path, BodySchema, QuerySchema, MiddlewareProps>,
   res: Response<any, ResponseLocals>,
   next?: NextFunction
 ) =>
@@ -504,15 +574,15 @@ export type ZodRouteHandler<
 /**
  * Options for defining a typed route, including schemas and middleware.
  *
- * @template BodySchema - Zod schema for request body validation.
- * @template QuerySchema - Zod schema for query parameter validation.
- * @property bodySchema - Optional Zod schema for validating the request body.
- * @property querySchema - Optional Zod schema for validating the query string.
+ * @template BodySchema - Schema for request body validation.
+ * @template QuerySchema - Schema for query parameter validation.
+ * @property bodySchema - Optional schema for validating the request body.
+ * @property querySchema - Optional schema for validating the query string.
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
 export interface RouteOptions<
-  BodySchema extends AnyZodType | unknown = unknown,
-  QuerySchema extends AnyZodType | unknown = unknown
+  BodySchema extends AnyStandardSchema | unknown = unknown,
+  QuerySchema extends AnyStandardSchema | unknown = unknown
 > {
   bodySchema?: BodySchema;
   querySchema?: QuerySchema;
@@ -570,7 +640,7 @@ class TypedRouter<
   // Method overloads for GET requests with automatic middleware type inference
   get<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -581,12 +651,12 @@ class TypedRouter<
 
   get<
     Path extends string,
-    BodySchema extends AnyZodType | unknown,
-    QuerySchema extends AnyZodType | unknown
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -602,7 +672,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: Middleware },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -613,13 +683,13 @@ class TypedRouter<
   // Combined overload for body/query schema + middleware
   get<
     Path extends string,
-    BodySchema extends AnyZodType | unknown,
-    QuerySchema extends AnyZodType | unknown,
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema> & { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -637,8 +707,8 @@ class TypedRouter<
   } // Combined overload for body/query schema + middleware (most specific first)
   post<
     Path extends string,
-    BodySchema extends AnyZodType,
-    QuerySchema extends AnyZodType | unknown,
+    BodySchema extends AnyStandardSchema,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -647,7 +717,7 @@ class TypedRouter<
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
     },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -659,12 +729,12 @@ class TypedRouter<
   // Body schema only + middleware
   post<
     Path extends string,
-    BodySchema extends AnyZodType,
+    BodySchema extends AnyStandardSchema,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
@@ -680,7 +750,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -692,12 +762,12 @@ class TypedRouter<
   // Body + Query schema without middleware
   post<
     Path extends string,
-    BodySchema extends AnyZodType | unknown,
-    QuerySchema extends AnyZodType | unknown
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -709,7 +779,7 @@ class TypedRouter<
   // Just handler, no options
   post<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -728,8 +798,8 @@ class TypedRouter<
   // PUT method with all the same overloads as POST
   put<
     Path extends string,
-    BodySchema extends AnyZodType,
-    QuerySchema extends AnyZodType | unknown,
+    BodySchema extends AnyStandardSchema,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -738,7 +808,7 @@ class TypedRouter<
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
     },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -749,12 +819,12 @@ class TypedRouter<
 
   put<
     Path extends string,
-    BodySchema extends AnyZodType,
+    BodySchema extends AnyStandardSchema,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
@@ -769,7 +839,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -780,12 +850,12 @@ class TypedRouter<
 
   put<
     Path extends string,
-    BodySchema extends AnyZodType | unknown,
-    QuerySchema extends AnyZodType | unknown
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -796,7 +866,7 @@ class TypedRouter<
 
   put<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -814,8 +884,8 @@ class TypedRouter<
   // PATCH method with all the same overloads as POST
   patch<
     Path extends string,
-    BodySchema extends AnyZodType,
-    QuerySchema extends AnyZodType | unknown,
+    BodySchema extends AnyStandardSchema,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -824,7 +894,7 @@ class TypedRouter<
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
     },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -835,12 +905,12 @@ class TypedRouter<
 
   patch<
     Path extends string,
-    BodySchema extends AnyZodType,
+    BodySchema extends AnyStandardSchema,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
@@ -855,7 +925,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -866,12 +936,12 @@ class TypedRouter<
 
   patch<
     Path extends string,
-    BodySchema extends AnyZodType | unknown,
-    QuerySchema extends AnyZodType | unknown
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -882,7 +952,7 @@ class TypedRouter<
 
   patch<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -900,12 +970,12 @@ class TypedRouter<
   // Most specific first: query schema + middleware
   delete<
     Path extends string,
-    QuerySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -915,10 +985,10 @@ class TypedRouter<
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Query schema only
-  delete<Path extends string, QuerySchema extends AnyZodType | unknown>(
+  delete<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
     path: Path,
     options: { querySchema: QuerySchema },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -934,7 +1004,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -946,7 +1016,7 @@ class TypedRouter<
   // Basic overload with no options
   delete<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -964,12 +1034,12 @@ class TypedRouter<
   // Most specific first: query schema + middleware
   options<
     Path extends string,
-    QuerySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -979,10 +1049,10 @@ class TypedRouter<
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Query schema only
-  options<Path extends string, QuerySchema extends AnyZodType | unknown>(
+  options<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
     path: Path,
     options: { querySchema: QuerySchema },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -998,7 +1068,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -1010,7 +1080,7 @@ class TypedRouter<
   // Basic overload with no options
   options<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -1028,12 +1098,12 @@ class TypedRouter<
   // Most specific first: query schema + middleware
   head<
     Path extends string,
-    QuerySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -1043,10 +1113,10 @@ class TypedRouter<
   ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
 
   // Query schema only
-  head<Path extends string, QuerySchema extends AnyZodType | unknown>(
+  head<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
     path: Path,
     options: { querySchema: QuerySchema },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -1062,7 +1132,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -1074,7 +1144,7 @@ class TypedRouter<
   // Basic overload with no options
   head<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -1092,8 +1162,8 @@ class TypedRouter<
   // Most specific first: body + query + middleware
   all<
     Path extends string,
-    BodySchema extends AnyZodType,
-    QuerySchema extends AnyZodType | unknown,
+    BodySchema extends AnyStandardSchema,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
@@ -1102,7 +1172,7 @@ class TypedRouter<
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
     },
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -1114,12 +1184,12 @@ class TypedRouter<
   // Body schema + middleware (no query)
   all<
     Path extends string,
-    BodySchema extends AnyZodType,
+    BodySchema extends AnyStandardSchema,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
@@ -1131,12 +1201,12 @@ class TypedRouter<
   // Query schema + middleware (no body)
   all<
     Path extends string,
-    QuerySchema extends AnyZodType | unknown,
+    QuerySchema extends AnyStandardSchema | unknown,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
     options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
@@ -1148,12 +1218,12 @@ class TypedRouter<
   // Body + query schemas (no middleware)
   all<
     Path extends string,
-    BodySchema extends AnyZodType | unknown,
-    QuerySchema extends AnyZodType | unknown
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown
   >(
     path: Path,
     options: RouteOptions<BodySchema, QuerySchema>,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
@@ -1169,7 +1239,7 @@ class TypedRouter<
   >(
     path: Path,
     options: { middleware: [...M] }, // Using tuple spread pattern
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -1181,7 +1251,7 @@ class TypedRouter<
   // Basic overload with no options
   all<Path extends string>(
     path: Path,
-    handler: ZodRouteHandler<
+    handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
@@ -1237,14 +1307,26 @@ class TypedRouter<
 
     return this;
   }
-  private createBodyValidationMiddleware(schema: AnyZodType) {
-    return (req: Request, res: Response, next: NextFunction) => {
+  private createBodyValidationMiddleware(schema: any) {
+    return async (req: Request, res: Response, next: NextFunction) => {
       try {
-        req.body = parseSchema(schema, req.body);
+        const result = safeParseSchema(schema, req.body) as any;
+        const resolved =
+          result && typeof (result as Promise<any>).then === "function"
+            ? await result
+            : result;
+        if (resolved && "issues" in resolved && resolved.issues) {
+          // Validation issues
+          res.status(400).json({
+            error: "Validation failed",
+            details: resolved.errors || resolved.issues,
+          });
+          return;
+        }
+        req.body = resolved && "value" in resolved ? resolved.value : resolved;
         next();
       } catch (error) {
-        // Check for ZodError using our unified helper
-        if (isZodError(error)) {
+        if (isSchemaError(error)) {
           res.status(400).json({
             error: "Validation failed",
             details: (error as any).errors || (error as any).issues,
@@ -1255,10 +1337,23 @@ class TypedRouter<
       }
     };
   }
-  private createQueryValidationMiddleware(schema: AnyZodType) {
-    return (req: Request, res: Response, next: NextFunction) => {
+  private createQueryValidationMiddleware(schema: any) {
+    return async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const validatedQuery = parseSchema(schema, req.query);
+        const result = safeParseSchema(schema, req.query) as any;
+        const resolved =
+          result && typeof (result as Promise<any>).then === "function"
+            ? await result
+            : result;
+        if (resolved && "issues" in resolved && resolved.issues) {
+          res.status(400).json({
+            error: "Validation failed",
+            details: resolved.errors || resolved.issues,
+          });
+          return;
+        }
+        const validatedQuery =
+          resolved && "value" in resolved ? resolved.value : resolved;
         // Use Object.defineProperty to properly set the read-only query property
         Object.defineProperty(req, "query", {
           value: validatedQuery,
@@ -1268,8 +1363,7 @@ class TypedRouter<
         });
         next();
       } catch (error) {
-        // Check for ZodError using our unified helper
-        if (isZodError(error)) {
+        if (isSchemaError(error)) {
           res.status(400).json({
             error: "Validation failed",
             details: (error as any).errors || (error as any).issues,
