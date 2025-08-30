@@ -1,3 +1,9 @@
+## [1.6.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.6.1...v1.6.2) (2025-08-30)
+
+### Bug Fixes
+
+* **schema:** enhance ExtractParams to support optional wildcard patterns ([ae085bc](https://github.com/Mini-Sylar/express-typed-router/commit/ae085bc1e12edbe99022fe12de84deb7e218df54))
+
 ## [1.6.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.6.0...v1.6.1) (2025-08-30)
 
 ### Bug Fixes
