@@ -366,8 +366,21 @@ type ExtractParams<Path extends string> =
  * Handles patterns like {/:param}, {.:ext}, {/optional/:param}
  */
 type ExtractOptionalSegment<Content extends string> =
-  // Handle optional parameter patterns like /:param
-  Content extends `/:${infer Rest}`
+  // Handle optional wildcard patterns inside braces like {*name} or {/*name}
+  Content extends `*${infer Name}`
+    ? Name extends ""
+      ? {}
+      : { [K in Name]?: string[] }
+    : Content extends `/${infer Rest}`
+    ? Rest extends `*${infer Name}`
+      ? Name extends ""
+        ? {}
+        : { [K in Name]?: string[] }
+      : Rest extends `:${infer R}`
+      ? ExtractOptionalParam<R>
+      : {}
+    : // Handle optional parameter patterns like /:param or .:param or path:param
+    Content extends `/:${infer Rest}`
     ? ExtractOptionalParam<Rest>
     : Content extends `.:${infer Rest}`
     ? ExtractOptionalParam<Rest>
