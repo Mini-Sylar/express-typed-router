@@ -318,6 +318,42 @@ type ExtractParams<Path extends string> =
     Path extends `${infer _Before}:${infer Rest}`
     ? ExtractSingleParam<Rest> & ExtractParams<RemoveFirstParam<Path>>
     : // Handle wildcards *
+    // Named wildcard like *splat (path-to-regexp v8) - capture name up to common delimiters
+    Path extends `${infer _Before}*${infer Name}/${infer After}`
+    ? Name extends ""
+      ? {
+          [K in CountWildcards<_Before, "0">]: string;
+        } & ExtractParams<`/${After}`>
+      : { [K in Name]: string[] } & ExtractParams<`/${After}`>
+    : Path extends `${infer _Before}*${infer Name}-${infer After}`
+    ? Name extends ""
+      ? {
+          [K in CountWildcards<_Before, "0">]: string;
+        } & ExtractParams<`-${After}`>
+      : { [K in Name]: string[] } & ExtractParams<`-${After}`>
+    : Path extends `${infer _Before}*${infer Name}.${infer After}`
+    ? Name extends ""
+      ? {
+          [K in CountWildcards<_Before, "0">]: string;
+        } & ExtractParams<`.${After}`>
+      : { [K in Name]: string[] } & ExtractParams<`.${After}`>
+    : Path extends `${infer _Before}*${infer Name}#${infer After}`
+    ? Name extends ""
+      ? {
+          [K in CountWildcards<_Before, "0">]: string;
+        } & ExtractParams<`#${After}`>
+      : { [K in Name]: string[] } & ExtractParams<`#${After}`>
+    : Path extends `${infer _Before}*${infer Name}:${infer After}`
+    ? Name extends ""
+      ? {
+          [K in CountWildcards<_Before, "0">]: string;
+        } & ExtractParams<`:${After}`>
+      : { [K in Name]: string[] } & ExtractParams<`:${After}`>
+    : Path extends `${infer _Before}*${infer Name}`
+    ? Name extends ""
+      ? { [K in CountWildcards<_Before, "0">]: string } & ExtractParams<``>
+      : { [K in Name]: string[] } & ExtractParams<``>
+    : // Fallback anonymous wildcard (legacy Express 4 style) - numeric index
     Path extends `${infer _Before}*${infer After}`
     ? {
         [K in CountWildcards<_Before, "0">]: string;
