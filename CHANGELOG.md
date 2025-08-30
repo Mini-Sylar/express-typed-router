@@ -1,3 +1,9 @@
+## [1.6.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.6.0...v1.6.1) (2025-08-30)
+
+### Bug Fixes
+
+* **schema:** enhance ExtractParams to support named wildcards and various delimiters ([a495d79](https://github.com/Mini-Sylar/express-typed-router/commit/a495d79c8ff39b747fa425607894f7cc443b13a8))
+
 ## [1.6.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.5.0...v1.6.0) (2025-08-24)
 
 ### Features
