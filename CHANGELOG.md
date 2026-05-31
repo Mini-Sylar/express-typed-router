@@ -4,6 +4,16 @@
 
 * add response sampling and documentation generation improvements ([b26fda2](https://github.com/Mini-Sylar/express-typed-router/commit/b26fda282a0ca3ec4ba09eb62a26bc95a5eb28fe))
 
+### Bug Fixes
+
+* trigger release ([dc7b7e6](https://github.com/Mini-Sylar/express-typed-router/commit/dc7b7e66c821cf9265a055456b2bc67af52fccf3))
+
+## [1.8.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.7.1...v1.8.0) (2026-05-31)
+
+### Features
+
+* add response sampling and documentation generation improvements ([b26fda2](https://github.com/Mini-Sylar/express-typed-router/commit/b26fda282a0ca3ec4ba09eb62a26bc95a5eb28fe))
+
 ## [1.7.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.7.0...v1.7.1) (2026-05-31)
 
 ### Bug Fixes
