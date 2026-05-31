@@ -1,3 +1,9 @@
+## [1.8.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.8.0...v1.8.1) (2026-05-31)
+
+### Bug Fixes
+
+* update README image for npm ([b2bd74b](https://github.com/Mini-Sylar/express-typed-router/commit/b2bd74b92ec879ad17d43cccf8145dd9f8aa0b27))
+
 ## [1.8.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.7.1...v1.8.0) (2026-05-31)
 
 ### Features
