@@ -1,3 +1,9 @@
+## [1.7.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.7.0...v1.7.1) (2026-05-31)
+
+### Bug Fixes
+
+* improve .use() to accept TypedRouter instances directly ([fdae9e1](https://github.com/Mini-Sylar/express-typed-router/commit/fdae9e12d626ce885feee828177e3a3f4b697296))
+
 ## [1.7.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.6.2...v1.7.0) (2026-05-31)
 
 ### Features
