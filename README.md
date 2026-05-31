@@ -6,6 +6,10 @@ Define routes once, infer `params` / `body` / `query`, and generate a clean API 
 
 ---
 
+![Scalar UI showing typed routes with request body schemas, enum values, and live response examples](https://github-production-user-asset-6210df.s3.amazonaws.com/75648051/600638539-d3ac3913-0347-47fd-a370-fb1ab8136ff7.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20260531%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260531T183343Z&X-Amz-Expires=300&X-Amz-Signature=660c354ad82fd84bb109455957fcdc6572e62cfde2fe5570241c06f5ff25f463&X-Amz-SignedHeaders=host&response-content-type=image%2Fpng)
+
+## Documentation generated from your codebase
+
 ## What you get
 
 - **Typed route handlers** — `req.params`, `req.body`, `req.query` inferred from your route + schema
@@ -13,7 +17,7 @@ Define routes once, infer `params` / `body` / `query`, and generate a clean API 
 - **✨ OpenAPI docs** — generated from routes, schemas, and captured responses
 - **Schema-agnostic** — any Standard Schema-compatible validator (Zod, Yup, Valibot, Arktype, Joi...)
 - **Express 4 & 5** — common patterns supported
-- **Client-friendly output** — generate `generated-types.d.ts` and build any client wrapper
+- **Client-friendly output** — generate `api.types.ts` and build any client wrapper
 
 ---
 
@@ -219,23 +223,22 @@ const api = createTypedRouter()
 
 app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 // Discovers all sub-routers and merges routes with correct prefixes
-
 ```
 
 ### Schema library support for docs
 
 All validators work for **request validation**. For **OpenAPI schema generation** (showing field names and types in the spec), some libraries need an extra converter package installed in your project. This library auto-detects them at runtime — install the one you need and it just works, no config required.
 
-| Library | Validation | Docs schema | Extra install |
-|---|---|---|---|
-| Zod 4 | ✅ | ✅ | none — built-in |
-| Zod 3 | ✅ | ✅ | `zod-to-json-schema` |
-| Valibot | ✅ | ✅ | `@valibot/to-json-schema` |
-| ArkType | ✅ | ✅ | none — built-in |
-| Effect | ✅ | ✅ | none — built-in |
-| Yup | ✅ | ⚠️ | not supported — no official JSON Schema converter |
-| Joi | ✅ | ⚠️ | not supported — no official JSON Schema converter |
-| Decoders / ts.data.json / unhoax | ✅ | ⚠️ | not supported — no schema introspection |
+| Library                          | Validation | Docs schema | Extra install                                     |
+| -------------------------------- | ---------- | ----------- | ------------------------------------------------- |
+| Zod 4                            | ✅         | ✅          | none — built-in                                   |
+| Zod 3                            | ✅         | ✅          | `zod-to-json-schema`                              |
+| Valibot                          | ✅         | ✅          | `@valibot/to-json-schema`                         |
+| ArkType                          | ✅         | ✅          | none — built-in                                   |
+| Effect                           | ✅         | ✅          | none — built-in                                   |
+| Yup                              | ✅         | ⚠️          | not supported — no official JSON Schema converter |
+| Joi                              | ✅         | ⚠️          | not supported — no official JSON Schema converter |
+| Decoders / ts.data.json / unhoax | ✅         | ⚠️          | not supported — no schema introspection           |
 
 > **⚠️ Partial docs** means routes still appear in the spec with paths, methods, and captured response examples — only the request body/query field shapes are missing.
 
@@ -243,27 +246,63 @@ All validators work for **request validation**. For **OpenAPI schema generation*
 
 ## Client types
 
-The library generates an OpenAPI spec. Feed it to `openapi-typescript` to get a `.d.ts` file, then use it with any HTTP client.
+Set `specOutputPath` in your docs options and the library writes `openapi.json` to disk automatically every time the server starts. That file is a standard OpenAPI 3.1 spec — use it with any OpenAPI-compatible tool: code generators, client SDKs, linters, mocking tools, and more.
 
-### Generate types
+For TypeScript projects, [openapi-typescript](https://github.com/openapi-ts/openapi-typescript) is a great option — it generates a `.d.ts` file from the spec that you can use with any HTTP client.
 
-One-time:
+### Setup
 
-```bash
-npx openapi-typescript http://localhost:3000/docs/openapi.json -o ./generated-types.d.ts
+**1. Enable spec output:**
+
+```ts
+app.use("/docs", router.docs({
+  title: "My API",
+  version: "1.0.0",
+  specOutputPath: "./openapi.json", // written automatically on every server start
+}));
 ```
 
-Watch mode — types regenerate automatically as routes change (requires `specOutputPath` set above):
+**2. Add the scripts to your `package.json`:**
+
+```json
+{
+  "scripts": {
+    "dev": "run-p dev:server dev:types",
+    "dev:server": "node --watch src/server.ts",
+    "dev:types": "nodemon -L --watch openapi.json --exec \"openapi-typescript ./openapi.json -o ./api.types.ts\""
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.0.0",
+    "nodemon": "^3.0.0",
+    "npm-run-all2": "^7.0.0"
+  }
+}
+```
+
+**3. Run it:**
 
 ```bash
-npx openapi-typescript ./openapi.json -o ./generated-types.d.ts --watch
+npm run dev
 ```
+
+That's it — one command runs everything in parallel:
+
+- `dev:server` — runs your server with `node --watch` (Node 18.11+; no `tsx` needed on Node 23.6+). On every save the server restarts and the library **rewrites `openapi.json` automatically**.
+- `dev:types` — `nodemon` watches `openapi.json` and regenerates `api.types.ts` whenever it changes.
+
+Edit a route, save, and your client types update on their own.
+
+> **Why `nodemon -L`?** On Windows, native file watchers miss in-place file writes — the `-L` flag forces polling so the regen reliably fires. On macOS/Linux you can drop it.
+
+> Add `openapi.json` and `api.types.ts` to `.gitignore` — both are generated.
+
+**Prefer to keep it manual?** Skip `nodemon` and `npm-run-all2` entirely — just run the server with `node --watch src/server.ts` and regenerate types on demand with `openapi-typescript ./openapi.json -o ./api.types.ts` whenever you change your API.
 
 ### Use with `openapi-fetch`
 
 ```ts
 import createClient from "openapi-fetch";
-import type { paths } from "./generated-types";
+import type { paths } from "./api.types";
 
 const client = createClient<paths>({ baseUrl: "http://localhost:3000/api" });
 
@@ -282,7 +321,7 @@ const { data: user } = await client.POST("/users", {
 If you prefer not to add `openapi-fetch`, use the generated types directly with standard `fetch`:
 
 ```ts
-import type { paths } from "./generated-types";
+import type { paths } from "./api.types";
 
 type Body<
   P extends keyof paths,

@@ -964,6 +964,11 @@ export class TypedRouter<
   private router: express.Router;
   private routes: RouteMetadata[] = [];
   private mountedRouters: Array<{ prefix: string; router: TypedRouter<any, any> }> = [];
+  // Response sampling is off until .docs()/createDocs() turns it on, so apps
+  // that never generate docs pay zero interceptor cost and retain no response
+  // bodies in memory. Read at request time, so routes registered before .docs()
+  // are covered too.
+  private samplingEnabled = false;
 
   constructor() {
     this.router = express.Router();
@@ -1036,12 +1041,12 @@ export class TypedRouter<
     // tracking them for .docs() along the way.
     const resolved = rawHandlers.map((h) => {
       if (h instanceof TypedRouter) {
-        this.mountedRouters.push({ prefix, router: h });
+        this.trackMounted(prefix, h);
         return h.getRouter();
       }
       const tracked = _typedRouterRegistry.get(h as object);
       if (tracked) {
-        this.mountedRouters.push({ prefix, router: tracked });
+        this.trackMounted(prefix, tracked);
       }
       return h as express.RequestHandler | express.Router;
     });
@@ -1082,10 +1087,10 @@ export class TypedRouter<
     if (typeof prefixOrRouter === "string") {
       const sub = maybeRouter!;
       this.router.use(prefixOrRouter, sub.getRouter());
-      this.mountedRouters.push({ prefix: prefixOrRouter, router: sub });
+      this.trackMounted(prefixOrRouter, sub);
     } else {
       this.router.use(prefixOrRouter.getRouter());
-      this.mountedRouters.push({ prefix: "", router: prefixOrRouter });
+      this.trackMounted("", prefixOrRouter);
     }
     return this;
   }
@@ -1106,6 +1111,33 @@ export class TypedRouter<
   }
 
   /**
+   * Turn on response sampling for this router and every router mounted under
+   * it. Called by .docs() and createDocs() so examples are captured only when
+   * docs are actually generated. The visited set guards against mount cycles.
+   * @internal Public only so createDocs() can reach it; not part of the API.
+   */
+  enableSampling(visited = new Set<TypedRouter<any, any>>()): void {
+    if (visited.has(this)) return;
+    visited.add(this);
+    this.samplingEnabled = true;
+    for (const { router } of this.mountedRouters) {
+      router.enableSampling(visited);
+    }
+  }
+
+  /**
+   * Record a sub-router for docs, de-duplicating identical (prefix, router)
+   * pairs and propagating sampling if docs were already requested.
+   */
+  private trackMounted(prefix: string, router: TypedRouter<any, any>): void {
+    if (this.mountedRouters.some((m) => m.router === router && m.prefix === prefix)) {
+      return;
+    }
+    this.mountedRouters.push({ prefix, router });
+    if (this.samplingEnabled) router.enableSampling();
+  }
+
+  /**
    * Returns an Express router that serves OpenAPI docs.
    * Mount it anywhere on your app — routes are auto-discovered.
    *
@@ -1115,21 +1147,28 @@ export class TypedRouter<
    * // GET /docs/openapi.json → raw OpenAPI 3.1 spec
    */
   docs(options: DocsOptions = {}): express.Router & express.RequestHandler {
+    // Generating docs implies we want response examples — start sampling now.
+    this.enableSampling();
+
     const docsRouter = express.Router();
+
+    if (options.specOutputPath) {
+      const self = this;
+      const outPath = options.specOutputPath;
+      setImmediate(async () => {
+        try {
+          const spec = await buildOpenApiSpec(self.getRouteMetadata(), options);
+          const fs = await _load("fs/promises");
+          await fs.writeFile(outPath, JSON.stringify(spec, null, 2), "utf8");
+        } catch {}
+      });
+    }
 
     docsRouter.get("/openapi.json", async (_req, res) => {
       try {
+        // Serve from memory only. The spec file (when specOutputPath is set) is
+        // written once on startup above — no need to touch disk per request.
         const spec = await buildOpenApiSpec(this.getRouteMetadata(), options);
-
-        // Write spec to disk when specOutputPath is set.
-        // This lets `openapi-typescript --watch` regenerate client types automatically.
-        if (options.specOutputPath) {
-          const fs = await _load("fs/promises");
-          await fs
-            .writeFile(options.specOutputPath, JSON.stringify(spec, null, 2), "utf8")
-            .catch(() => {});
-        }
-
         res.json(spec);
       } catch (err) {
         res
@@ -1840,13 +1879,27 @@ export class TypedRouter<
     }
 
     // Intercept res.json to capture the first response sample per status code.
-    // Bails out once hidden or enough samples are collected (no bind, no closure).
+    // After a short warmup we stop wrapping entirely so the steady-state hot
+    // path is a single comparison + early return — no per-request allocation.
+    // The cap is on total observations (not distinct statuses) because most
+    // routes only ever emit 1-3 status codes, which would otherwise leave the
+    // size-based bailout permanently unreached and re-wrap res.json forever.
+    let observed = 0;
     const interceptor = (
       _req: Request,
       res: Response,
       next: NextFunction
     ) => {
-      if (meta.hidden || meta.responseSamples.size >= 10) { next(); return; }
+      if (
+        !this.samplingEnabled ||
+        meta.hidden ||
+        observed >= 50 ||
+        meta.responseSamples.size >= 10
+      ) {
+        next();
+        return;
+      }
+      observed++;
       const original = res.json;
       res.json = (body: any) => {
         if (!meta.responseSamples.has(res.statusCode)) {
@@ -2075,6 +2128,9 @@ export function createDocs(
         ? (entry as { prefix: string; router: TypedRouter<any, any> })
         : { prefix: "", router: entry as TypedRouter<any, any> }
   );
+
+  // Generating docs implies we want response examples — start sampling now.
+  for (const { router } of entries) router.enableSampling();
 
   const docsRouter = express.Router();
 
