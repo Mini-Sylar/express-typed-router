@@ -195,7 +195,7 @@ app.use(
 
 - route paths, methods, and path parameters
 - query and body schemas (from `querySchema` / `bodySchema`)
-- response examples — captured from real `res.json()` calls, no manual input needed
+- **response schemas** — inferred from real traffic (see [Response schemas](#response-schemas-from-live-traffic) below)
 - tags and summaries — inferred from route paths, or set manually
 
 **Custom route metadata:**
@@ -225,6 +225,49 @@ app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 // Discovers all sub-routers and merges routes with correct prefixes
 ```
 
+### Response schemas from live traffic
+
+You don't have to declare what your routes return. The library **observes real responses** (`res.json` / `res.send`), **infers a JSON Schema** from them, and **merges across samples** — so it learns field types, which fields are nullable, and which are optional. This drives both the docs UI and `openapi-typescript` (real response types instead of `unknown`).
+
+By default this runs in **redacted** mode: only the shape is kept, never the values — so no real user data is ever stored or shown.
+
+```ts
+// A few responses like { id: 1, email: "a@b.com", nickname: "Al" } and
+// { id: 2, email: null } are observed and merged into:
+{
+  type: "object",
+  properties: {
+    id:       { type: "integer" },
+    email:    { type: ["string", "null"] },  // nullable — seen as null sometimes
+    nickname: { type: "string" }             // optional — missing in some responses
+  },
+  required: ["id", "email"]                   // nickname excluded
+}
+```
+
+Control it with `sampleResponses`:
+
+| Value | Behavior |
+|---|---|
+| `true` _(default)_ | **Redacted** — infer schema only. Real values discarded at capture time. Safe to expose. |
+| `"live"` | Infer schema **and** attach one real captured response as an example. ⚠️ Examples contain actual data — use only for trusted/internal docs. |
+| `false` | Don't observe responses at all. |
+
+```ts
+// Safe default — schema only, no real data
+app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
+
+// Show real example payloads (internal docs only)
+app.use("/docs", api.docs({ title: "My API", version: "1.0.0", sampleResponses: "live" }));
+
+// Disable entirely
+app.use("/docs", api.docs({ title: "My API", version: "1.0.0", sampleResponses: false }));
+```
+
+> Exclude an individual sensitive route from docs with `hidden: true` in its route options — works in any mode.
+
+> **Note:** observed schemas live in memory and fill in as traffic flows (they reset on server restart). The live `/docs/openapi.json` endpoint always reflects the latest — so to get inferred **response** types in your generated client, point `openapi-typescript` at the running URL after exercising your routes. The `specOutputPath` file is written once at startup (before traffic), so it carries request schemas only.
+
 ### Schema library support for docs
 
 All validators work for **request validation**. For **OpenAPI schema generation** (showing field names and types in the spec), some libraries need an extra converter package installed in your project. This library auto-detects them at runtime — install the one you need and it just works, no config required.
@@ -240,7 +283,7 @@ All validators work for **request validation**. For **OpenAPI schema generation*
 | Joi                              | ✅         | ⚠️          | not supported — no official JSON Schema converter |
 | Decoders / ts.data.json / unhoax | ✅         | ⚠️          | not supported — no schema introspection           |
 
-> **⚠️ Partial docs** means routes still appear in the spec with paths, methods, and captured response examples — only the request body/query field shapes are missing.
+> **⚠️ Partial docs** means routes still appear in the spec with paths, methods, and inferred response schemas — only the request body/query field shapes are missing.
 
 ---
 

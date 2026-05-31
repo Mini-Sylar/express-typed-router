@@ -682,6 +682,10 @@ export interface DocsOptions {
    * Enables `openapi-typescript --watch` in development — the tool watches
    * the file and regenerates your client types automatically as routes change.
    *
+   * The file is written once at startup, so it contains route **schemas only**
+   * — never captured response examples. This keeps real response data (which
+   * may include PII) out of any file you might commit or share.
+   *
    * @example
    * // docs options
    * { specOutputPath: './openapi.json' }
@@ -690,6 +694,27 @@ export interface DocsOptions {
    * // npx openapi-typescript ./openapi.json -o ./src/client.d.ts --watch
    */
   specOutputPath?: string;
+  /**
+   * Learn response shapes from live traffic and add them to the docs. The
+   * library observes real responses and **infers a JSON Schema** from them
+   * (field names, types, nullability, required vs optional) — so the docs and
+   * generated client types reflect what your API actually returns.
+   *
+   * Modes:
+   * - `true` (default) — **redacted**: infer the schema only. Real values are
+   *   discarded at capture time, so no user data is ever stored or shown. Safe
+   *   to expose.
+   * - `"live"` — infer the schema **and** attach a real captured response as an
+   *   example. ⚠️ Examples contain actual data (emails, tokens, IDs). Only use
+   *   for trusted/internal docs.
+   * - `false` — don't observe responses at all.
+   *
+   * Use the per-route `hidden: true` option to exclude individual sensitive
+   * routes regardless of mode.
+   *
+   * @default true
+   */
+  sampleResponses?: boolean | "live";
 }
 
 interface RouteMetadata {
@@ -703,7 +728,9 @@ interface RouteMetadata {
   deprecated?: boolean;
   responseSchema?: AnyStandardSchema;
   hidden?: boolean;
-  responseSamples: Map<number, unknown>;
+  // Per status code: a JSON Schema inferred (and merged) from observed
+  // responses, plus an optional real example (only in "live" mode).
+  responseSamples: Map<number, { schema: Record<string, any>; example?: unknown }>;
 }
 
 // Routes all dynamic imports through new Function to keep the source free of
@@ -821,6 +848,93 @@ async function _resolveSchemaToJsonSchema(
   return {};
 }
 
+// ─── Response schema inference ───────────────────────────────────────────────
+// We learn response shapes from observed bodies without ever keeping the real
+// values (in redacted mode). Each observation is turned into a JSON Schema and
+// merged with what we've seen before, so optional/nullable fields surface once
+// enough traffic has been seen.
+
+function inferJsonSchema(value: unknown): Record<string, any> {
+  if (value === null || value === undefined) return { type: "null" };
+  if (Array.isArray(value)) {
+    if (value.length === 0) return { type: "array", items: {} };
+    let items: Record<string, any> = inferJsonSchema(value[0]);
+    for (let i = 1; i < value.length; i++) {
+      items = mergeJsonSchema(items, inferJsonSchema(value[i]));
+    }
+    return { type: "array", items };
+  }
+  switch (typeof value) {
+    case "string":
+      return { type: "string" };
+    case "boolean":
+      return { type: "boolean" };
+    case "number":
+      return { type: Number.isInteger(value) ? "integer" : "number" };
+    case "object": {
+      const properties: Record<string, any> = {};
+      const required: string[] = [];
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        properties[k] = inferJsonSchema(v);
+        required.push(k);
+      }
+      const out: Record<string, any> = { type: "object", properties };
+      if (required.length) out.required = required;
+      return out;
+    }
+    default:
+      return {};
+  }
+}
+
+function typeSet(schema: Record<string, any> | undefined): Set<string> {
+  if (!schema || schema.type === undefined) return new Set();
+  return new Set(Array.isArray(schema.type) ? schema.type : [schema.type]);
+}
+
+function collapseTypes(types: Set<string>): string | string[] | undefined {
+  // integer is a subset of number — prefer number when both appear.
+  if (types.has("integer") && types.has("number")) types.delete("integer");
+  const arr = [...types];
+  if (arr.length === 0) return undefined;
+  return arr.length === 1 ? arr[0]! : arr;
+}
+
+function mergeJsonSchema(
+  a: Record<string, any> | undefined,
+  b: Record<string, any> | undefined
+): Record<string, any> {
+  if (!a || Object.keys(a).length === 0) return b ?? {};
+  if (!b || Object.keys(b).length === 0) return a ?? {};
+
+  const types = new Set([...typeSet(a), ...typeSet(b)]);
+  const merged: Record<string, any> = {};
+  const t = collapseTypes(types);
+  if (t !== undefined) merged.type = t;
+
+  if (types.has("object") && (a.properties || b.properties)) {
+    const aProps: Record<string, any> = a.properties ?? {};
+    const bProps: Record<string, any> = b.properties ?? {};
+    const props: Record<string, any> = {};
+    for (const key of new Set([...Object.keys(aProps), ...Object.keys(bProps)])) {
+      props[key] = mergeJsonSchema(aProps[key], bProps[key]);
+    }
+    merged.properties = props;
+    // A field is required only if it was required in every observation.
+    const aReq: string[] = a.required ?? [];
+    const bReq: string[] = b.required ?? [];
+    const required = aReq.filter((k) => bReq.includes(k));
+    if (required.length) merged.required = required;
+  }
+
+  if (types.has("array")) {
+    const items = mergeJsonSchema(a.items, b.items);
+    if (items && Object.keys(items).length) merged.items = items;
+  }
+
+  return merged;
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -901,9 +1015,11 @@ async function buildOpenApiSpec(
     const responses: Record<string, any> = {};
     if (route.responseSamples.size > 0) {
       for (const [status, sample] of route.responseSamples) {
+        const json: Record<string, any> = { schema: sample.schema };
+        if (sample.example !== undefined) json.example = sample.example;
         responses[String(status)] = {
           description: status < 400 ? "Success" : "Error",
-          content: { "application/json": { example: sample } },
+          content: { "application/json": json },
         };
       }
     } else {
@@ -964,11 +1080,14 @@ export class TypedRouter<
   private router: express.Router;
   private routes: RouteMetadata[] = [];
   private mountedRouters: Array<{ prefix: string; router: TypedRouter<any, any> }> = [];
-  // Response sampling is off until .docs()/createDocs() turns it on, so apps
-  // that never generate docs pay zero interceptor cost and retain no response
-  // bodies in memory. Read at request time, so routes registered before .docs()
-  // are covered too.
-  private samplingEnabled = false;
+  // Response observation is off until .docs()/createDocs() turns it on, so apps
+  // that never generate docs pay zero interceptor cost. "redacted" infers a
+  // JSON Schema and keeps no real values; "live" also keeps one real example.
+  // Read at request time, so routes registered before .docs() are covered too.
+  private sampleMode: "off" | "redacted" | "live" = "off";
+  // When specOutputPath is set, this debounced writer rewrites the spec file as
+  // newly observed response schemas come in, so file-watch type-gen stays fresh.
+  private scheduleSpecWrite?: () => void;
 
   constructor() {
     this.router = express.Router();
@@ -1111,30 +1230,37 @@ export class TypedRouter<
   }
 
   /**
-   * Turn on response sampling for this router and every router mounted under
-   * it. Called by .docs() and createDocs() so examples are captured only when
-   * docs are actually generated. The visited set guards against mount cycles.
+   * Turn on response observation for this router and every router mounted under
+   * it. Called by .docs() and createDocs() so it happens only when docs are
+   * actually generated. The visited set guards against mount cycles.
    * @internal Public only so createDocs() can reach it; not part of the API.
    */
-  enableSampling(visited = new Set<TypedRouter<any, any>>()): void {
+  enableSampling(
+    mode: "redacted" | "live" = "redacted",
+    writer?: () => void,
+    visited = new Set<TypedRouter<any, any>>()
+  ): void {
     if (visited.has(this)) return;
     visited.add(this);
-    this.samplingEnabled = true;
+    this.sampleMode = mode;
+    this.scheduleSpecWrite = writer;
     for (const { router } of this.mountedRouters) {
-      router.enableSampling(visited);
+      router.enableSampling(mode, writer, visited);
     }
   }
 
   /**
    * Record a sub-router for docs, de-duplicating identical (prefix, router)
-   * pairs and propagating sampling if docs were already requested.
+   * pairs and propagating the sample mode if docs were already requested.
    */
   private trackMounted(prefix: string, router: TypedRouter<any, any>): void {
     if (this.mountedRouters.some((m) => m.router === router && m.prefix === prefix)) {
       return;
     }
     this.mountedRouters.push({ prefix, router });
-    if (this.samplingEnabled) router.enableSampling();
+    if (this.sampleMode !== "off") {
+      router.enableSampling(this.sampleMode, this.scheduleSpecWrite);
+    }
   }
 
   /**
@@ -1147,21 +1273,37 @@ export class TypedRouter<
    * // GET /docs/openapi.json → raw OpenAPI 3.1 spec
    */
   docs(options: DocsOptions = {}): express.Router & express.RequestHandler {
-    // Generating docs implies we want response examples — start sampling now.
-    this.enableSampling();
-
     const docsRouter = express.Router();
 
+    // When specOutputPath is set, write the spec at startup and then re-write it
+    // (debounced) whenever a newly observed response schema changes the spec —
+    // so file-watch client type-gen picks up response shapes as traffic flows.
+    let scheduleWrite: (() => void) | undefined;
     if (options.specOutputPath) {
-      const self = this;
       const outPath = options.specOutputPath;
-      setImmediate(async () => {
+      const writeSpec = async () => {
         try {
-          const spec = await buildOpenApiSpec(self.getRouteMetadata(), options);
+          const spec = await buildOpenApiSpec(this.getRouteMetadata(), options);
           const fs = await _load("fs/promises");
           await fs.writeFile(outPath, JSON.stringify(spec, null, 2), "utf8");
         } catch {}
-      });
+      };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      scheduleWrite = () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(writeSpec, 300);
+        timer.unref?.(); // don't keep short-lived processes alive
+      };
+      setImmediate(writeSpec); // initial snapshot at startup
+    }
+
+    // Observe responses to infer schemas, unless opted out. "live" also keeps a
+    // real example; the default redacted mode keeps no real values.
+    if (options.sampleResponses !== false) {
+      this.enableSampling(
+        options.sampleResponses === "live" ? "live" : "redacted",
+        scheduleWrite
+      );
     }
 
     docsRouter.get("/openapi.json", async (_req, res) => {
@@ -1893,9 +2035,20 @@ export class TypedRouter<
     // size-based bailout permanently unreached and re-wrap forever.
     let observed = 0;
     const capture = (res: Response, body: unknown) => {
-      if (!meta.responseSamples.has(res.statusCode)) {
-        meta.responseSamples.set(res.statusCode, body);
-      }
+      const status = res.statusCode;
+      const schema = inferJsonSchema(body);
+      const existing = meta.responseSamples.get(status);
+      // Merge each observation so optional/nullable fields surface over time.
+      const merged = existing ? mergeJsonSchema(existing.schema, schema) : schema;
+      // Keep one real example only in "live" mode; redacted keeps no values.
+      const example =
+        this.sampleMode === "live" ? existing?.example ?? body : undefined;
+      // Only rewrite the spec file when the inferred shape actually changed —
+      // so the debounced writer goes quiet once schemas stabilize.
+      const changed =
+        !existing || JSON.stringify(existing.schema) !== JSON.stringify(merged);
+      meta.responseSamples.set(status, { schema: merged, example });
+      if (changed) this.scheduleSpecWrite?.();
     };
     const interceptor = (
       _req: Request,
@@ -1903,7 +2056,7 @@ export class TypedRouter<
       next: NextFunction
     ) => {
       if (
-        !this.samplingEnabled ||
+        this.sampleMode === "off" ||
         meta.hidden ||
         observed >= 50 ||
         meta.responseSamples.size >= 10
@@ -2151,8 +2304,11 @@ export function createDocs(
         : { prefix: "", router: entry as TypedRouter<any, any> }
   );
 
-  // Generating docs implies we want response examples — start sampling now.
-  for (const { router } of entries) router.enableSampling();
+  // Observe responses to infer schemas, unless opted out (privacy).
+  if (options.sampleResponses !== false) {
+    const mode = options.sampleResponses === "live" ? "live" : "redacted";
+    for (const { router } of entries) router.enableSampling(mode);
+  }
 
   const docsRouter = express.Router();
 
