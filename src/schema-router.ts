@@ -1005,44 +1005,51 @@ export class TypedRouter<
    * automatically recognised and tracked for .docs() — no extra wiring needed.
    *
    * @example
-   * // v1.routes.ts — keep your exact existing pattern, just use TypedRouter
+   * // v1.routes.ts — pass TypedRouter instances directly, no .getRouter() needed
    * export const v1Routes = createTypedRouter()
    *
-   * v1Routes.use('/products',  productRoutes.getRouter())   // tracked ✓
-   * v1Routes.use('/profile',   profileRoutes.getRouter())   // tracked ✓
-   * v1Routes.use('/',          callbackRouter)              // plain Express, not tracked
+   * v1Routes.use('/products', productRoutes)   // tracked ✓
+   * v1Routes.use('/profile',  profileRoutes)   // tracked ✓
+   * v1Routes.use('/',         callbackRouter)  // plain Express, also works
    *
    * app.use('/v1', v1Routes.getRouter())
    * app.use('/docs', v1Routes.docs({ title: 'My API' }))    // just works
    */
   use(
     path: string,
-    ...handlers: Array<express.RequestHandler | express.Router>
+    ...handlers: Array<express.RequestHandler | express.Router | TypedRouter<any, any>>
   ): TypedRouter<Req, Locals>;
   use(
-    ...handlers: Array<express.RequestHandler | express.Router>
+    ...handlers: Array<express.RequestHandler | express.Router | TypedRouter<any, any>>
   ): TypedRouter<Req, Locals>;
   use(
-    pathOrHandler: string | express.RequestHandler | express.Router,
-    ...rest: Array<express.RequestHandler | express.Router>
+    pathOrHandler: string | express.RequestHandler | express.Router | TypedRouter<any, any>,
+    ...rest: Array<express.RequestHandler | express.Router | TypedRouter<any, any>>
   ): TypedRouter<Req, Locals> {
     const isPath = typeof pathOrHandler === "string";
     const prefix = isPath ? (pathOrHandler as string) : "";
-    const handlers = isPath
+    const rawHandlers = isPath
       ? rest
-      : [pathOrHandler as express.RequestHandler, ...rest];
+      : [pathOrHandler as express.RequestHandler | express.Router | TypedRouter<any, any>, ...rest];
 
-    for (const h of handlers) {
+    // Resolve TypedRouter instances to their underlying Express routers,
+    // tracking them for .docs() along the way.
+    const resolved = rawHandlers.map((h) => {
+      if (h instanceof TypedRouter) {
+        this.mountedRouters.push({ prefix, router: h });
+        return h.getRouter();
+      }
       const tracked = _typedRouterRegistry.get(h as object);
       if (tracked) {
         this.mountedRouters.push({ prefix, router: tracked });
       }
-    }
+      return h as express.RequestHandler | express.Router;
+    });
 
     if (isPath) {
-      (this.router as any).use(pathOrHandler, ...handlers);
+      (this.router as any).use(pathOrHandler, ...resolved);
     } else {
-      (this.router as any).use(...handlers);
+      (this.router as any).use(...resolved);
     }
 
     return this;
@@ -1501,6 +1508,13 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
 
+  // Doc meta only (tags, summary, description, etc. — no schema or middleware)
+  delete<Path extends string>(
+    path: Path,
+    options: DocMeta,
+    handler: SchemaRouteHandler<Path, unknown, unknown, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+
   // Middleware only
   delete<
     Path extends string,
@@ -1565,6 +1579,13 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
 
+  // Doc meta only (tags, summary, description, etc. — no schema or middleware)
+  options<Path extends string>(
+    path: Path,
+    options: DocMeta,
+    handler: SchemaRouteHandler<Path, unknown, unknown, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+
   // Middleware only
   options<
     Path extends string,
@@ -1627,6 +1648,13 @@ export class TypedRouter<
       Req,
       Locals
     >
+  ): TypedRouter<Req, Locals>;
+
+  // Doc meta only (tags, summary, description, etc. — no schema or middleware)
+  head<Path extends string>(
+    path: Path,
+    options: DocMeta,
+    handler: SchemaRouteHandler<Path, unknown, unknown, Req, Locals>
   ): TypedRouter<Req, Locals>;
 
   // Middleware only

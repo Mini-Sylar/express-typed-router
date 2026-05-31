@@ -219,6 +219,7 @@ const api = createTypedRouter()
 
 app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 // Discovers all sub-routers and merges routes with correct prefixes
+
 ```
 
 ### Schema library support for docs
