@@ -764,20 +764,37 @@ async function importDynamic(mod: string): Promise<any> {
 const _schemaJsonCache = new WeakMap<object, Record<string, any>>();
 
 function expressPathToOpenApi(path: string): string {
-  return path.replace(/:([^/?*.()]+)\??/g, "{$1}");
+  return (
+    path
+      // Express 5 optional-segment braces: `{/:id}` / `{/seg}` → keep contents.
+      .replace(/\{([^{}]*)\}/g, "$1")
+      // `:name`, optionally with a regex constraint `(...)` and a `?`/`+`/`*`
+      // modifier → OpenAPI `{name}`.
+      .replace(/:([A-Za-z0-9_]+)(?:\([^)]*\))?[?+*]?/g, "{$1}")
+      // Brace removal can leave `//` (e.g. `/x{/:id}` → `/x//...`); collapse it.
+      .replace(/\/{2,}/g, "/")
+  );
 }
 
 function extractPathParamNames(path: string): string[] {
-  return [...path.matchAll(/:([^/?*.()]+)\??/g)].map((m) => m[1]!);
+  const stripped = path.replace(/\{([^{}]*)\}/g, "$1");
+  return [...stripped.matchAll(/:([A-Za-z0-9_]+)/g)].map((m) => m[1]!);
 }
 
 function autoTag(path: string): string {
-  const first = path.split("/").filter(Boolean)[0];
-  return first && !first.startsWith(":") ? first : "default";
+  const first = path
+    .replace(/[{}]/g, "")
+    .split("/")
+    .filter(Boolean)
+    .find((s) => !s.startsWith(":") && !s.startsWith("*"));
+  return first ?? "default";
 }
 
 function autoSummary(method: string, path: string): string {
-  const segments = path.split("/").filter((s) => s && !s.startsWith(":"));
+  const segments = path
+    .replace(/[{}]/g, "")
+    .split("/")
+    .filter((s) => s && !s.startsWith(":") && !s.startsWith("*"));
   const resource = segments[segments.length - 1] ?? "resource";
   const prefix: Record<string, string> = {
     get: "Get",
