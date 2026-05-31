@@ -1,3 +1,9 @@
+## [1.7.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.6.2...v1.7.0) (2026-05-31)
+
+### Features
+
+* add OpenAPI docs generation, client type support, and schema coverage ([3f1a4c5](https://github.com/Mini-Sylar/express-typed-router/commit/3f1a4c55a76013cea2112a999c2cdfa7028ef920))
+
 ## [1.6.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.6.1...v1.6.2) (2025-08-30)
 
 ### Bug Fixes
