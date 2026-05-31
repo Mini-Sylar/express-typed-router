@@ -6,7 +6,7 @@ Define routes once, infer `params` / `body` / `query`, and generate a clean API 
 
 ---
 
-![Scalar UI showing typed routes with request body schemas, enum values, and live response examples](https://github-production-user-asset-6210df.s3.amazonaws.com/75648051/600638539-d3ac3913-0347-47fd-a370-fb1ab8136ff7.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20260531%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260531T183343Z&X-Amz-Expires=300&X-Amz-Signature=660c354ad82fd84bb109455957fcdc6572e62cfde2fe5570241c06f5ff25f463&X-Amz-SignedHeaders=host&response-content-type=image%2Fpng)
+![Scalar UI showing typed routes with request body schemas, enum values, and live response examples](https://raw.githubusercontent.com/Mini-Sylar/express-typed-router/main/docs/docsScreenshot.png)
 
 ## Documentation generated from your codebase
 
@@ -255,11 +255,14 @@ For TypeScript projects, [openapi-typescript](https://github.com/openapi-ts/open
 **1. Enable spec output:**
 
 ```ts
-app.use("/docs", router.docs({
-  title: "My API",
-  version: "1.0.0",
-  specOutputPath: "./openapi.json", // written automatically on every server start
-}));
+app.use(
+  "/docs",
+  router.docs({
+    title: "My API",
+    version: "1.0.0",
+    specOutputPath: "./openapi.json", // written automatically on every server start
+  }),
+);
 ```
 
 **2. Add the scripts to your `package.json`:**
