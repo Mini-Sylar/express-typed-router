@@ -1878,13 +1878,25 @@ export class TypedRouter<
       middlewares.push(optionsOrHandler);
     }
 
-    // Intercept res.json to capture the first response sample per status code.
+    // Intercept res.json AND res.send to capture the first response sample per
+    // status code. We can't rely on res.send() delegating to res.json() — that
+    // is standard Express behaviour, but middleware (Shopify, APMs, loggers)
+    // routinely monkeypatch res.send so it no longer funnels through res.json.
+    // Wrapping both means we capture however the body is emitted; the
+    // `!has(statusCode)` guard makes the first writer win, so when send DOES
+    // delegate to json we still only store one sample.
+    //
     // After a short warmup we stop wrapping entirely so the steady-state hot
     // path is a single comparison + early return — no per-request allocation.
     // The cap is on total observations (not distinct statuses) because most
     // routes only ever emit 1-3 status codes, which would otherwise leave the
-    // size-based bailout permanently unreached and re-wrap res.json forever.
+    // size-based bailout permanently unreached and re-wrap forever.
     let observed = 0;
+    const capture = (res: Response, body: unknown) => {
+      if (!meta.responseSamples.has(res.statusCode)) {
+        meta.responseSamples.set(res.statusCode, body);
+      }
+    };
     const interceptor = (
       _req: Request,
       res: Response,
@@ -1900,13 +1912,23 @@ export class TypedRouter<
         return;
       }
       observed++;
-      const original = res.json;
-      res.json = (body: any) => {
-        if (!meta.responseSamples.has(res.statusCode)) {
-          meta.responseSamples.set(res.statusCode, body);
-        }
-        return original.call(res, body);
+
+      const originalJson = res.json;
+      res.json = function (body: any) {
+        capture(res, body);
+        return originalJson.call(this, body);
       };
+
+      const originalSend = res.send;
+      res.send = function (body: any) {
+        // Only sample JSON-like object bodies; skip strings, Buffers, null.
+        // (When send delegates to our wrapped json, json already captured it.)
+        if (body !== null && typeof body === "object" && !Buffer.isBuffer(body)) {
+          capture(res, body);
+        }
+        return originalSend.call(this, body);
+      };
+
       next();
     };
 
