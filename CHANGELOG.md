@@ -1,3 +1,9 @@
+## [1.8.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.8.1...v1.8.2) (2026-05-31)
+
+### Bug Fixes
+
+* capture response examples from res.send(), not just res.json() ([2617f84](https://github.com/Mini-Sylar/express-typed-router/commit/2617f842328a966dbb1ab1e82bdeaaf71200a3b6))
+
 ## [1.8.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.8.0...v1.8.1) (2026-05-31)
 
 ### Bug Fixes
