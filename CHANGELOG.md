@@ -1,3 +1,9 @@
+## [1.9.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.8.2...v1.9.0) (2026-05-31)
+
+### Features
+
+* infer redacted response schemas from live traffic instead of storing raw examples ([0074944](https://github.com/Mini-Sylar/express-typed-router/commit/007494435c0cc8435c7a2cf389a641985a7a4e91))
+
 ## [1.8.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.8.1...v1.8.2) (2026-05-31)
 
 ### Bug Fixes
