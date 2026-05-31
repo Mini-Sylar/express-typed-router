@@ -636,7 +636,22 @@ export interface RouteOptions<
   bodySchema?: BodySchema;
   querySchema?: QuerySchema;
   middleware?: TypedMiddleware<any, any>[];
+  tags?: string[];
+  description?: string;
+  summary?: string;
+  deprecated?: boolean;
+  responseSchema?: AnyStandardSchema;
+  /** Exclude this route from the generated OpenAPI spec entirely. */
+  hidden?: boolean;
 }
+
+// Doc-only fields extracted from RouteOptions — merged into typed middleware
+// overloads so users can pass tags/summary/etc. alongside middleware: [...M]
+// without TypeScript's excess-property checking dropping the typed overload.
+type DocMeta = Pick<
+  RouteOptions<unknown, unknown>,
+  "tags" | "summary" | "description" | "deprecated" | "responseSchema" | "hidden"
+>;
 
 // HTTP methods
 export type HttpMethod =
@@ -649,15 +664,310 @@ export type HttpMethod =
   | "head"
   | "all";
 
-// Main typed router class
-class TypedRouter<
-  RouterMiddlewareProps extends Record<string, any> = {},
-  RouterLocals extends Record<string, any> = {}
+// ─── OpenAPI / Docs ──────────────────────────────────────────────────────────
+
+export interface DocsOptions {
+  title?: string;
+  version?: string;
+  description?: string;
+  servers?: Array<{ url: string; description?: string }>;
+  /**
+   * Override the Scalar CDN URL. Use this to pin a specific version or
+   * self-host the Scalar bundle to avoid the external CDN dependency.
+   * @default "https://cdn.jsdelivr.net/npm/@scalar/api-reference"
+   */
+  cdnUrl?: string;
+  /**
+   * File path to write the OpenAPI spec to whenever it is generated.
+   * Enables `openapi-typescript --watch` in development — the tool watches
+   * the file and regenerates your client types automatically as routes change.
+   *
+   * @example
+   * // docs options
+   * { specOutputPath: './openapi.json' }
+   *
+   * // then in a separate terminal (or via concurrently in package.json):
+   * // npx openapi-typescript ./openapi.json -o ./src/client.d.ts --watch
+   */
+  specOutputPath?: string;
+}
+
+interface RouteMetadata {
+  method: HttpMethod;
+  path: string;
+  bodySchema?: AnyStandardSchema;
+  querySchema?: AnyStandardSchema;
+  tags?: string[];
+  description?: string;
+  summary?: string;
+  deprecated?: boolean;
+  responseSchema?: AnyStandardSchema;
+  hidden?: boolean;
+  responseSamples: Map<number, unknown>;
+}
+
+// Routes all dynamic imports through new Function to keep the source free of
+// import() expressions (avoids a rolldown-plugin-dts bug) and to prevent
+// bundlers from statically analysing and inlining optional peer deps.
+// `m` is ALWAYS one of our own hardcoded module names — never user input —
+// so there is no eval-like injection risk here despite what SAST tools may flag.
+const _load = new Function("m", "return import(m)") as (m: string) => Promise<any>;
+
+// Cached after first use — built-in modules never change
+let _nodeModule: any;
+let _nodeUrl: any;
+
+// Resolves optional peer deps (zod, valibot, etc.) starting from the process's
+// working directory so Node.js walks the user's node_modules tree rather than
+// looking relative to this library file's own installed location.
+async function importDynamic(mod: string): Promise<any> {
+  try {
+    _nodeModule ??= await _load("module");
+    _nodeUrl ??= await _load("url");
+    const cwd: string = (globalThis as any).process?.cwd?.() ?? "";
+    const req = _nodeModule.createRequire(_nodeUrl.pathToFileURL(cwd + "/").href);
+    const resolved: string = req.resolve(mod);
+    return _load(_nodeUrl.pathToFileURL(resolved).href);
+  } catch {
+    return _load(mod);
+  }
+}
+
+// Schemas are immutable objects — cache conversion results by identity
+const _schemaJsonCache = new WeakMap<object, Record<string, any>>();
+
+function expressPathToOpenApi(path: string): string {
+  return path.replace(/:([^/?*.()]+)\??/g, "{$1}");
+}
+
+function extractPathParamNames(path: string): string[] {
+  return [...path.matchAll(/:([^/?*.()]+)\??/g)].map((m) => m[1]!);
+}
+
+function autoTag(path: string): string {
+  const first = path.split("/").filter(Boolean)[0];
+  return first && !first.startsWith(":") ? first : "default";
+}
+
+function autoSummary(method: string, path: string): string {
+  const segments = path.split("/").filter((s) => s && !s.startsWith(":"));
+  const resource = segments[segments.length - 1] ?? "resource";
+  const prefix: Record<string, string> = {
+    get: "Get",
+    post: "Create",
+    put: "Update",
+    patch: "Patch",
+    delete: "Delete",
+    head: "Head",
+    options: "Options",
+  };
+  return `${prefix[method] ?? method} ${resource}`;
+}
+
+async function trySchemaToJsonSchema(
+  schema: AnyStandardSchema
+): Promise<Record<string, any>> {
+  const cached = _schemaJsonCache.get(schema as object);
+  if (cached) return cached;
+  const result = await _resolveSchemaToJsonSchema(schema);
+  _schemaJsonCache.set(schema as object, result);
+  return result;
+}
+
+async function _resolveSchemaToJsonSchema(
+  schema: AnyStandardSchema
+): Promise<Record<string, any>> {
+  // ArkType exposes toJsonSchema() directly on the type object
+  if (typeof (schema as any).toJsonSchema === "function") {
+    try {
+      return (schema as any).toJsonSchema() as Record<string, any>;
+    } catch {}
+  }
+
+  const vendor: unknown = (schema as any)["~standard"]?.vendor;
+
+  if (vendor === "zod") {
+    // Zod 4 has a built-in toJSONSchema export
+    try {
+      const mod = await importDynamic("zod");
+      if (typeof mod.toJSONSchema === "function")
+        return mod.toJSONSchema(schema) as Record<string, any>;
+    } catch {}
+    // Zod 3 needs the optional peer dep zod-to-json-schema
+    try {
+      const mod = await importDynamic("zod-to-json-schema");
+      const fn = mod.zodToJsonSchema ?? mod.default?.zodToJsonSchema;
+      if (typeof fn === "function") return fn(schema) as Record<string, any>;
+    } catch {}
+  }
+
+  if (vendor === "valibot") {
+    try {
+      const mod = await importDynamic("@valibot/to-json-schema");
+      const fn = mod.toJsonSchema ?? mod.default?.toJsonSchema;
+      if (typeof fn === "function") return fn(schema) as Record<string, any>;
+    } catch {}
+  }
+
+  if (vendor === "effect") {
+    // Effect ships JSONSchema.make() in the effect package itself — no extra install needed
+    try {
+      const mod = await importDynamic("effect");
+      const make = mod.JSONSchema?.make ?? mod.default?.JSONSchema?.make;
+      if (typeof make === "function") return make(schema) as Record<string, any>;
+    } catch {}
+  }
+
+  return {};
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+const DEFAULT_SCALAR_CDN = "https://cdn.jsdelivr.net/npm/@scalar/api-reference";
+
+function scalarHtml(title: string, specUrl: string, cdnUrl: string): string {
+  return `<!doctype html>
+<html>
+  <head>
+    <title>${escapeHtml(title)}</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <script id="api-reference" data-url="${escapeHtml(specUrl)}"></script>
+    <script src="${escapeHtml(cdnUrl)}"></script>
+  </body>
+</html>`;
+}
+
+async function buildOpenApiSpec(
+  routes: RouteMetadata[],
+  options: DocsOptions
+): Promise<Record<string, any>> {
+  const paths: Record<string, any> = Object.create(null);
+
+  for (const route of routes) {
+    if (route.method === "all" || route.hidden) continue;
+
+    const openApiPath = expressPathToOpenApi(route.path);
+    if (!paths[openApiPath]) paths[openApiPath] = {};
+
+    const parameters: any[] = extractPathParamNames(route.path).map(
+      (name) => ({
+        name,
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+      })
+    );
+
+    if (route.querySchema) {
+      const qs = await trySchemaToJsonSchema(route.querySchema);
+      const props: Record<string, any> = qs.properties ?? {};
+      const required: string[] = qs.required ?? [];
+      for (const [name, propSchema] of Object.entries(props)) {
+        parameters.push({
+          name,
+          in: "query",
+          required: required.includes(name),
+          schema: propSchema,
+        });
+      }
+    }
+
+    const operation: Record<string, any> = {
+      summary: route.summary ?? autoSummary(route.method, route.path),
+      tags: route.tags ?? [autoTag(route.path)],
+      parameters,
+    };
+
+    if (route.description) operation.description = route.description;
+    if (route.deprecated) operation.deprecated = true;
+
+    if (route.bodySchema) {
+      const bs = await trySchemaToJsonSchema(route.bodySchema);
+      operation.requestBody = {
+        required: true,
+        content: { "application/json": { schema: bs } },
+      };
+    }
+
+    const responses: Record<string, any> = {};
+    if (route.responseSamples.size > 0) {
+      for (const [status, sample] of route.responseSamples) {
+        responses[String(status)] = {
+          description: status < 400 ? "Success" : "Error",
+          content: { "application/json": { example: sample } },
+        };
+      }
+    } else {
+      responses["200"] = { description: "Success" };
+    }
+    operation.responses = responses;
+
+    paths[openApiPath][route.method] = operation;
+  }
+
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: options.title ?? "API",
+      version: options.version ?? "1.0.0",
+      ...(options.description ? { description: options.description } : {}),
+    },
+    ...(options.servers ? { servers: options.servers } : {}),
+    paths,
+  };
+}
+
+// Maps each Express router instance back to the TypedRouter that owns it.
+// Used by .use() to auto-detect sub-routers passed via .getRouter() and
+// track them for docs without requiring any new API.
+const _typedRouterRegistry = new WeakMap<object, TypedRouter<any, any>>();
+
+/**
+ * Extra properties that middleware has added to the Express `req` object.
+ *
+ * Starts as `{}` (nothing added yet) and widens automatically with every
+ * `.useMiddleware()` call. After `router.useMiddleware(authMiddleware)` where
+ * `authMiddleware` contributes `{ userId: string }`, this becomes `{ userId: string }`.
+ *
+ * You will see this type in router hover text — it is the accumulating "req additions" slot.
+ */
+export type AdditionalReqProps = {};
+
+/**
+ * Extra properties that middleware has added to `res.locals`.
+ *
+ * Starts as `{}` and widens automatically with every `.useMiddleware()` call,
+ * mirroring the `TLocals` parameter of each `TypedMiddleware` you attach.
+ */
+export type AdditionalLocals = {};
+
+/**
+ * A strongly-typed Express router. The two generic params accumulate as
+ * middleware is added via `.useMiddleware()`.
+ *
+ * @typeParam Req    - Extra properties on `req` contributed by middleware. Starts as {@link AdditionalReqProps}.
+ * @typeParam Locals - Extra properties on `res.locals` contributed by middleware. Starts as {@link AdditionalLocals}.
+ */
+export class TypedRouter<
+  Req extends Record<string, any> = AdditionalReqProps,
+  Locals extends Record<string, any> = AdditionalLocals
 > {
   private router: express.Router;
+  private routes: RouteMetadata[] = [];
+  private mountedRouters: Array<{ prefix: string; router: TypedRouter<any, any> }> = [];
 
   constructor() {
     this.router = express.Router();
+    _typedRouterRegistry.set(this.router, this);
   }
   /**
    * Add typed middleware that extends the request with additional properties
@@ -676,16 +986,161 @@ class TypedRouter<
     TLocals extends Record<string, any> = {}
   >(
     middleware: TypedMiddleware<TReq, TLocals>
-  ): TypedRouter<RouterMiddlewareProps & TReq, RouterLocals & TLocals> {
+  ): TypedRouter<Req & TReq, Locals & TLocals> {
     this.router.use(middleware as any);
     return this as any;
   }
   /**
-   * Get the underlying Express router
+   * Get the underlying Express router, typed as a RequestHandler so it can be
+   * passed directly to app.use() without a cast in Express 5.
    */
-  getRouter(): express.Router {
-    return this.router;
+  getRouter(): express.Router & express.RequestHandler {
+    return this.router as express.Router & express.RequestHandler;
   }
+
+  /**
+   * Mount middleware or a sub-router at an optional path prefix.
+   *
+   * When passed the result of another TypedRouter's .getRouter(), it is
+   * automatically recognised and tracked for .docs() — no extra wiring needed.
+   *
+   * @example
+   * // v1.routes.ts — keep your exact existing pattern, just use TypedRouter
+   * export const v1Routes = createTypedRouter()
+   *
+   * v1Routes.use('/products',  productRoutes.getRouter())   // tracked ✓
+   * v1Routes.use('/profile',   profileRoutes.getRouter())   // tracked ✓
+   * v1Routes.use('/',          callbackRouter)              // plain Express, not tracked
+   *
+   * app.use('/v1', v1Routes.getRouter())
+   * app.use('/docs', v1Routes.docs({ title: 'My API' }))    // just works
+   */
+  use(
+    path: string,
+    ...handlers: Array<express.RequestHandler | express.Router>
+  ): TypedRouter<Req, Locals>;
+  use(
+    ...handlers: Array<express.RequestHandler | express.Router>
+  ): TypedRouter<Req, Locals>;
+  use(
+    pathOrHandler: string | express.RequestHandler | express.Router,
+    ...rest: Array<express.RequestHandler | express.Router>
+  ): TypedRouter<Req, Locals> {
+    const isPath = typeof pathOrHandler === "string";
+    const prefix = isPath ? (pathOrHandler as string) : "";
+    const handlers = isPath
+      ? rest
+      : [pathOrHandler as express.RequestHandler, ...rest];
+
+    for (const h of handlers) {
+      const tracked = _typedRouterRegistry.get(h as object);
+      if (tracked) {
+        this.mountedRouters.push({ prefix, router: tracked });
+      }
+    }
+
+    if (isPath) {
+      (this.router as any).use(pathOrHandler, ...handlers);
+    } else {
+      (this.router as any).use(...handlers);
+    }
+
+    return this;
+  }
+
+  /**
+   * Mount a TypedRouter at a path prefix, registering it both on the Express
+   * router and in the docs registry so .docs() picks it up automatically.
+   *
+   * @example
+   * const v1 = createTypedRouter()
+   *   .mount('/products', productRoutes)
+   *   .mount('/profile',  profileRoutes)
+   *   .mount('/supplier', supplierRoutes)
+   *
+   * app.use('/v1', v1.getRouter())
+   * app.use('/docs', v1.docs({ title: 'My API' }))
+   */
+  mount(
+    prefix: string,
+    router: TypedRouter<any, any>
+  ): TypedRouter<Req, Locals>;
+  mount(
+    router: TypedRouter<any, any>
+  ): TypedRouter<Req, Locals>;
+  mount(
+    prefixOrRouter: string | TypedRouter<any, any>,
+    maybeRouter?: TypedRouter<any, any>
+  ): TypedRouter<Req, Locals> {
+    if (typeof prefixOrRouter === "string") {
+      const sub = maybeRouter!;
+      this.router.use(prefixOrRouter, sub.getRouter());
+      this.mountedRouters.push({ prefix: prefixOrRouter, router: sub });
+    } else {
+      this.router.use(prefixOrRouter.getRouter());
+      this.mountedRouters.push({ prefix: "", router: prefixOrRouter });
+    }
+    return this;
+  }
+
+  /**
+   * Returns the collected route metadata for this router, including all
+   * sub-routers registered via .mount() with their prefixes applied.
+   * Used internally by .docs() and by createDocs() for multi-router merging.
+   */
+  getRouteMetadata(): RouteMetadata[] {
+    const mounted = this.mountedRouters.flatMap(({ prefix, router }) =>
+      router.getRouteMetadata().map((meta) => ({
+        ...meta,
+        path: prefix + meta.path,
+      }))
+    );
+    return [...this.routes, ...mounted];
+  }
+
+  /**
+   * Returns an Express router that serves OpenAPI docs.
+   * Mount it anywhere on your app — routes are auto-discovered.
+   *
+   * @example
+   * app.use('/docs', router.docs({ title: 'My API', version: '1.0.0' }))
+   * // GET /docs           → Scalar UI
+   * // GET /docs/openapi.json → raw OpenAPI 3.1 spec
+   */
+  docs(options: DocsOptions = {}): express.Router & express.RequestHandler {
+    const docsRouter = express.Router();
+
+    docsRouter.get("/openapi.json", async (_req, res) => {
+      try {
+        const spec = await buildOpenApiSpec(this.getRouteMetadata(), options);
+
+        // Write spec to disk when specOutputPath is set.
+        // This lets `openapi-typescript --watch` regenerate client types automatically.
+        if (options.specOutputPath) {
+          const fs = await _load("fs/promises");
+          await fs
+            .writeFile(options.specOutputPath, JSON.stringify(spec, null, 2), "utf8")
+            .catch(() => {});
+        }
+
+        res.json(spec);
+      } catch (err) {
+        res
+          .status(500)
+          .json({ error: "Failed to generate spec", details: String(err) });
+      }
+    });
+
+    docsRouter.get("/", (req, res) => {
+      const specUrl = `${req.baseUrl}/openapi.json`;
+      const cdnUrl = options.cdnUrl ?? DEFAULT_SCALAR_CDN;
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.send(scalarHtml(options.title ?? "API", specUrl, cdnUrl));
+    });
+
+    return docsRouter as express.Router & express.RequestHandler;
+  }
+
   // Method overloads for GET requests with automatic middleware type inference
   get<Path extends string>(
     path: Path,
@@ -693,10 +1148,10 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   get<
     Path extends string,
@@ -709,10 +1164,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Special overload for middleware type inference
   get<
@@ -725,10 +1180,10 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<Middleware>,
-      RouterLocals & InferMiddlewareLocals<Middleware>
+      Req & InferMiddlewareProps<Middleware>,
+      Locals & InferMiddlewareLocals<Middleware>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   // Combined overload for body/query schema + middleware
   get<
     Path extends string,
@@ -742,16 +1197,16 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   // Implementation
   get(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
   } // Combined overload for body/query schema + middleware (most specific first)
   post<
@@ -761,7 +1216,7 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: {
+    options: DocMeta & {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
@@ -770,10 +1225,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Body schema only + middleware
   post<
@@ -782,15 +1237,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Middleware only
   post<
@@ -798,15 +1253,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Body + Query schema without middleware
   post<
@@ -820,10 +1275,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Just handler, no options
   post<Path extends string>(
@@ -832,16 +1287,16 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   post(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("post", path, optionsOrHandler, handler);
   }
   // PUT method with all the same overloads as POST
@@ -852,7 +1307,7 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: {
+    options: DocMeta & {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
@@ -861,10 +1316,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   put<
     Path extends string,
@@ -872,30 +1327,30 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   put<
     Path extends string,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   put<
     Path extends string,
@@ -908,10 +1363,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   put<Path extends string>(
     path: Path,
@@ -919,15 +1374,15 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   put(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("put", path, optionsOrHandler, handler);
   }
   // PATCH method with all the same overloads as POST
@@ -938,7 +1393,7 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: {
+    options: DocMeta & {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
@@ -947,10 +1402,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   patch<
     Path extends string,
@@ -958,30 +1413,30 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   patch<
     Path extends string,
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   patch<
     Path extends string,
@@ -994,10 +1449,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   patch<Path extends string>(
     path: Path,
@@ -1005,15 +1460,15 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   patch(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("patch", path, optionsOrHandler, handler);
   } // DELETE method (typically no body, but can have query params and middleware)
   // Most specific first: query schema + middleware
@@ -1023,15 +1478,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Query schema only
   delete<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
@@ -1041,10 +1496,10 @@ class TypedRouter<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Middleware only
   delete<
@@ -1052,15 +1507,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Basic overload with no options
   delete<Path extends string>(
@@ -1069,15 +1524,15 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   delete(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("delete", path, optionsOrHandler, handler);
   } // OPTIONS method (typically no body, used for CORS preflight)
   // Most specific first: query schema + middleware
@@ -1087,15 +1542,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Query schema only
   options<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
@@ -1105,10 +1560,10 @@ class TypedRouter<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Middleware only
   options<
@@ -1116,15 +1571,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Basic overload with no options
   options<Path extends string>(
@@ -1133,15 +1588,15 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   options(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("options", path, optionsOrHandler, handler);
   } // HEAD method (like GET but only returns headers)
   // Most specific first: query schema + middleware
@@ -1151,15 +1606,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Query schema only
   head<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
@@ -1169,10 +1624,10 @@ class TypedRouter<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Middleware only
   head<
@@ -1180,15 +1635,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Basic overload with no options
   head<Path extends string>(
@@ -1197,15 +1652,15 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   head(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("head", path, optionsOrHandler, handler);
   } // ALL method (matches all HTTP methods)
   // Most specific first: body + query + middleware
@@ -1216,7 +1671,7 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: {
+    options: DocMeta & {
       bodySchema: BodySchema;
       querySchema?: QuerySchema;
       middleware: [...M]; // Using tuple spread pattern
@@ -1225,10 +1680,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Body schema + middleware (no query)
   all<
@@ -1237,15 +1692,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Query schema + middleware (no body)
   all<
@@ -1254,15 +1709,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       QuerySchema,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Body + query schemas (no middleware)
   all<
@@ -1276,10 +1731,10 @@ class TypedRouter<
       Path,
       BodySchema,
       QuerySchema,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Middleware only (no schemas)
   all<
@@ -1287,15 +1742,15 @@ class TypedRouter<
     M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
   >(
     path: Path,
-    options: { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
     handler: SchemaRouteHandler<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      RouterLocals & InferMiddlewareLocals<readonly [...M]>
+      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Locals & InferMiddlewareLocals<readonly [...M]>
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
 
   // Basic overload with no options
   all<Path extends string>(
@@ -1304,15 +1759,15 @@ class TypedRouter<
       Path,
       unknown,
       unknown,
-      RouterMiddlewareProps,
-      RouterLocals
+      Req,
+      Locals
     >
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals>;
+  ): TypedRouter<Req, Locals>;
   all(
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     return this.registerRoute("all", path, optionsOrHandler, handler);
   }
   // Helper method to register routes
@@ -1321,18 +1776,26 @@ class TypedRouter<
     path: string,
     optionsOrHandler: any,
     handler?: any
-  ): TypedRouter<RouterMiddlewareProps, RouterLocals> {
+  ): TypedRouter<Req, Locals> {
     const middlewares: any[] = [];
+    const meta: RouteMetadata = { method, path, responseSamples: new Map() };
+    this.routes.push(meta);
 
     if (typeof optionsOrHandler === "object") {
       const options = optionsOrHandler as RouteOptions<any, any>;
 
-      // Add per-route middleware first
+      meta.bodySchema = options.bodySchema as AnyStandardSchema | undefined;
+      meta.querySchema = options.querySchema as AnyStandardSchema | undefined;
+      meta.tags = options.tags;
+      meta.description = options.description;
+      meta.summary = options.summary;
+      meta.deprecated = options.deprecated;
+      meta.responseSchema = options.responseSchema;
+      meta.hidden = options.hidden;
+
       if (options.middleware) {
         middlewares.push(...options.middleware);
       }
-
-      // Add schema validation middleware
       if (options.bodySchema) {
         middlewares.push(
           this.createBodyValidationMiddleware(options.bodySchema)
@@ -1343,16 +1806,30 @@ class TypedRouter<
           this.createQueryValidationMiddleware(options.querySchema)
         );
       }
-
-      // Add the main handler
       middlewares.push(handler);
     } else {
-      // Direct handler without options
       middlewares.push(optionsOrHandler);
     }
 
-    // Register with Express router
-    (this.router as any)[method](path, ...middlewares);
+    // Intercept res.json to capture the first response sample per status code.
+    // Bails out once hidden or enough samples are collected (no bind, no closure).
+    const interceptor = (
+      _req: Request,
+      res: Response,
+      next: NextFunction
+    ) => {
+      if (meta.hidden || meta.responseSamples.size >= 10) { next(); return; }
+      const original = res.json;
+      res.json = (body: any) => {
+        if (!meta.responseSamples.has(res.statusCode)) {
+          meta.responseSamples.set(res.statusCode, body);
+        }
+        return original.call(res, body);
+      };
+      next();
+    };
+
+    (this.router as any)[method](path, interceptor, ...middlewares);
 
     return this;
   }
@@ -1446,10 +1923,10 @@ class TypedRouter<
  * app.use('/api', router.getRouter());
  */
 export function createTypedRouter<
-  RouterMiddlewareProps extends Record<string, any> = {},
-  RouterLocals extends Record<string, any> = {}
->(): TypedRouter<RouterMiddlewareProps, RouterLocals> {
-  return new TypedRouter<RouterMiddlewareProps, RouterLocals>();
+  Req extends Record<string, any> = AdditionalReqProps,
+  Locals extends Record<string, any> = AdditionalLocals
+>(): TypedRouter<Req, Locals> {
+  return new TypedRouter<Req, Locals>();
 }
 
 // Option 2: Factory with optional configuration
@@ -1488,10 +1965,10 @@ export interface RouterConfig {
  * });
  */
 export function createTypedRouterWithConfig<
-  RouterMiddlewareProps extends Record<string, any> = {},
-  RouterLocals extends Record<string, any> = {}
->(config?: RouterConfig): TypedRouter<RouterMiddlewareProps, RouterLocals> {
-  const router = new TypedRouter<RouterMiddlewareProps, RouterLocals>();
+  Req extends Record<string, any> = AdditionalReqProps,
+  Locals extends Record<string, any> = AdditionalLocals
+>(config?: RouterConfig): TypedRouter<Req, Locals> {
+  const router = new TypedRouter<Req, Locals>();
   if (config?.errorHandler) {
     router.getRouter().use(config.errorHandler);
   }
@@ -1521,4 +1998,81 @@ export function createTypedRouterWithMiddleware<T extends Record<string, any>>(
     router = router.useMiddleware(mw);
   }
   return router;
+}
+
+/**
+ * An entry for createDocs(). Either a bare TypedRouter (no prefix prepended)
+ * or an object with an explicit prefix matching the mount point in app.use().
+ *
+ * @example
+ * // Routes defined as /users/:id — mount prefix prepends /api
+ * { prefix: '/api', router: usersRouter }
+ *
+ * // Routes already include the full path — no prefix needed
+ * authRouter
+ */
+export type RouterDocEntry =
+  | TypedRouter<any, any>
+  | { prefix: string; router: TypedRouter<any, any> };
+
+/**
+ * Create a unified OpenAPI docs endpoint that merges routes from multiple
+ * TypedRouter instances. Use this when routes are split across files.
+ *
+ * @example
+ * // users.router.ts — routes like /users, /users/:id
+ * export const usersRouter = createTypedRouter();
+ *
+ * // auth.router.ts — routes like /login, /logout
+ * export const authRouter = createTypedRouter();
+ *
+ * // app.ts
+ * app.use('/api', usersRouter.getRouter());
+ * app.use('/api', authRouter.getRouter());
+ * app.use('/docs', createDocs(
+ *   [
+ *     { prefix: '/api', router: usersRouter },
+ *     { prefix: '/api', router: authRouter },
+ *   ],
+ *   { title: 'My API', version: '1.0.0' }
+ * ));
+ */
+export function createDocs(
+  routers: RouterDocEntry | RouterDocEntry[],
+  options: DocsOptions = {}
+): express.Router & express.RequestHandler {
+  const entries = (Array.isArray(routers) ? routers : [routers]).map(
+    (entry): { prefix: string; router: TypedRouter<any, any> } =>
+      "prefix" in entry
+        ? (entry as { prefix: string; router: TypedRouter<any, any> })
+        : { prefix: "", router: entry as TypedRouter<any, any> }
+  );
+
+  const docsRouter = express.Router();
+
+  docsRouter.get("/openapi.json", async (_req, res) => {
+    try {
+      const mergedRoutes: RouteMetadata[] = entries.flatMap(({ prefix, router }) =>
+        router.getRouteMetadata().map((meta) => ({
+          ...meta,
+          path: prefix + meta.path,
+        }))
+      );
+      const spec = await buildOpenApiSpec(mergedRoutes, options);
+      res.json(spec);
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: "Failed to generate spec", details: String(err) });
+    }
+  });
+
+  docsRouter.get("/", (req, res) => {
+    const specUrl = `${req.baseUrl}/openapi.json`;
+    const cdnUrl = options.cdnUrl ?? DEFAULT_SCALAR_CDN;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(scalarHtml(options.title ?? "API", specUrl, cdnUrl));
+  });
+
+  return docsRouter as express.Router & express.RequestHandler;
 }

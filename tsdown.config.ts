@@ -7,10 +7,12 @@ export default defineConfig({
   sourcemap: false,
   clean: true,
   outDir: "dist",
-  external: ["express", "@standard-schema/spec", "@standard-schema/utils"],
   target: "es2022",
   platform: "node",
   minify: true,
   treeshake: true,
-  skipNodeModulesBundle: true,
+  deps: {
+    neverBundle: ["express", "@standard-schema/spec", "@standard-schema/utils"],
+    skipNodeModulesBundle: true,
+  },
 });
