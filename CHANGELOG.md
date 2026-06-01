@@ -1,3 +1,9 @@
+## [1.9.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.1...v1.9.2) (2026-06-01)
+
+### Bug Fixes
+
+* persist inferred response schemas across restarts and emit declared responseSchema ([39eecc6](https://github.com/Mini-Sylar/express-typed-router/commit/39eecc644a8c204dfd4693a1b966c40d7c32ee0a))
+
 ## [1.9.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.0...v1.9.1) (2026-05-31)
 
 ### Bug Fixes
