@@ -1030,16 +1030,34 @@ async function buildOpenApiSpec(
     }
 
     const responses: Record<string, any> = {};
-    if (route.responseSamples.size > 0) {
-      for (const [status, sample] of route.responseSamples) {
-        const json: Record<string, any> = { schema: sample.schema };
-        if (sample.example !== undefined) json.example = sample.example;
-        responses[String(status)] = {
-          description: status < 400 ? "Success" : "Error",
-          content: { "application/json": json },
+    // Inferred-from-traffic schemas (best-effort, may be stale).
+    for (const [status, sample] of route.responseSamples) {
+      const json: Record<string, any> = { schema: sample.schema };
+      if (sample.example !== undefined) json.example = sample.example;
+      responses[String(status)] = {
+        description: status < 400 ? "Success" : "Error",
+        content: { "application/json": json },
+      };
+    }
+    // A declared responseSchema is the source of truth — it wins over inference
+    // for the success response (no staleness, reflects current code exactly).
+    if (route.responseSchema) {
+      const declared = await trySchemaToJsonSchema(route.responseSchema);
+      if (declared && Object.keys(declared).length) {
+        let successStatus = "200";
+        for (const code of route.responseSamples.keys()) {
+          if (code >= 200 && code < 300) {
+            successStatus = String(code);
+            break;
+          }
+        }
+        responses[successStatus] = {
+          description: "Success",
+          content: { "application/json": { schema: declared } },
         };
       }
-    } else {
+    }
+    if (Object.keys(responses).length === 0) {
       responses["200"] = { description: "Success" };
     }
     operation.responses = responses;
@@ -1281,6 +1299,42 @@ export class TypedRouter<
   }
 
   /**
+   * Seed in-memory response schemas from a previously written spec, so a server
+   * restart doesn't reset the docs/spec file to empty. Only fills statuses we
+   * haven't already observed this process, and never overwrites fresher data.
+   * @internal
+   */
+  hydrateResponses(
+    spec: any,
+    prefix = "",
+    visited = new Set<TypedRouter<any, any>>()
+  ): void {
+    if (visited.has(this)) return;
+    visited.add(this);
+    const paths = spec?.paths ?? {};
+    for (const route of this.routes) {
+      const op = paths[expressPathToOpenApi(prefix + route.path)]?.[route.method];
+      const responses = op?.responses;
+      if (!responses) continue;
+      for (const status of Object.keys(responses)) {
+        const code = Number(status);
+        if (Number.isNaN(code) || route.responseSamples.has(code)) continue;
+        const json = responses[status]?.content?.["application/json"];
+        if (!json?.schema) continue;
+        route.responseSamples.set(
+          code,
+          json.example !== undefined
+            ? { schema: json.schema, example: json.example }
+            : { schema: json.schema }
+        );
+      }
+    }
+    for (const { prefix: p, router } of this.mountedRouters) {
+      router.hydrateResponses(spec, prefix + p, visited);
+    }
+  }
+
+  /**
    * Returns an Express router that serves OpenAPI docs.
    * Mount it anywhere on your app — routes are auto-discovered.
    *
@@ -1311,7 +1365,21 @@ export class TypedRouter<
         timer = setTimeout(writeSpec, 300);
         timer.unref?.(); // don't keep short-lived processes alive
       };
-      setImmediate(writeSpec); // initial snapshot at startup
+      // On startup, reload schemas the previous run already learned, then write.
+      // This stops a restart from clobbering the file with an empty spec before
+      // traffic has re-populated it.
+      setImmediate(async () => {
+        try {
+          const fs = await _load("fs/promises");
+          const existing = await fs.readFile(outPath, "utf8").catch(() => null);
+          if (existing) {
+            try {
+              this.hydrateResponses(JSON.parse(existing));
+            } catch {}
+          }
+        } catch {}
+        await writeSpec();
+      });
     }
 
     // Observe responses to infer schemas, unless opted out. "live" also keeps a
