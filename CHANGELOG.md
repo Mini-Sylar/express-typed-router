@@ -1,3 +1,9 @@
+## [1.9.3](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.2...v1.9.3) (2026-06-01)
+
+### Bug Fixes
+
+* auto-create specOutputPath directory and harden response inference ([65c418d](https://github.com/Mini-Sylar/express-typed-router/commit/65c418df14b2dc65b4ddb5560b727b1c23ca8bd7))
+
 ## [1.9.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.1...v1.9.2) (2026-06-01)
 
 ### Bug Fixes
