@@ -1,3 +1,9 @@
+## [1.9.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.0...v1.9.1) (2026-05-31)
+
+### Bug Fixes
+
+* normalize Express 5 optional-segment paths in OpenAPI output ([ac4c9bb](https://github.com/Mini-Sylar/express-typed-router/commit/ac4c9bbee568999448ca7d7582b06855c354f440))
+
 ## [1.9.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.8.2...v1.9.0) (2026-05-31)
 
 ### Features
