@@ -17,7 +17,7 @@ Define routes once, infer `params` / `body` / `query`, and generate a clean API 
 - **✨ OpenAPI docs** — generated from routes, schemas, and captured responses
 - **Schema-agnostic** — any Standard Schema-compatible validator (Zod, Yup, Valibot, Arktype, Joi...)
 - **Express 4 & 5** — common patterns supported
-- **Client-friendly output** — generate `api.types.ts` and build any client wrapper
+- **Client-friendly output** — generate `api.d.ts` and build any client wrapper
 
 ---
 
@@ -266,7 +266,13 @@ app.use("/docs", api.docs({ title: "My API", version: "1.0.0", sampleResponses: 
 
 > Exclude an individual sensitive route from docs with `hidden: true` in its route options — works in any mode.
 
-> **Note:** observed schemas live in memory and fill in as traffic flows (they reset on server restart). The live `/docs/openapi.json` endpoint always reflects the latest — so to get inferred **response** types in your generated client, point `openapi-typescript` at the running URL after exercising your routes. The `specOutputPath` file is written once at startup (before traffic), so it carries request schemas only.
+**How it persists:** schemas fill in as traffic flows. They're held in memory and, when `specOutputPath` is set, written to the file (debounced) as new shapes are observed. On startup the library **reloads** the existing file, so a restart doesn't reset what was already learned — the file is the durable store.
+
+**Gotchas:**
+
+- **Reset accumulated schemas** — inference is merge-only, so a field you _remove_ from a response lingers in the docs. To clear it, delete `openapi.json` and let it rebuild from current traffic.
+- **`responseSchema` beats inference** — declare it on routes you want guaranteed-correct (and leak-proof); it overrides whatever traffic suggests.
+- **`res.jsonp()` isn't captured** — only `res.json` and `res.send`. JSONP responses won't get an inferred schema (declare `responseSchema` if you need one).
 
 ### Schema library support for docs
 
@@ -315,7 +321,7 @@ app.use(
   "scripts": {
     "dev": "run-p dev:server dev:types",
     "dev:server": "node --watch src/server.ts",
-    "dev:types": "nodemon -L --watch openapi.json --exec \"openapi-typescript ./openapi.json -o ./api.types.ts\""
+    "dev:types": "nodemon -L --watch openapi.json --exec \"openapi-typescript ./openapi.json -o ./api.d.ts\""
   },
   "devDependencies": {
     "openapi-typescript": "^7.0.0",
@@ -334,21 +340,23 @@ npm run dev
 That's it — one command runs everything in parallel:
 
 - `dev:server` — runs your server with `node --watch` (Node 18.11+; no `tsx` needed on Node 23.6+). On every save the server restarts and the library **rewrites `openapi.json` automatically**.
-- `dev:types` — `nodemon` watches `openapi.json` and regenerates `api.types.ts` whenever it changes.
+- `dev:types` — `nodemon` watches `openapi.json` and regenerates `api.d.ts` whenever it changes.
 
 Edit a route, save, and your client types update on their own.
 
 > **Why `nodemon -L`?** On Windows, native file watchers miss in-place file writes — the `-L` flag forces polling so the regen reliably fires. On macOS/Linux you can drop it.
 
-> Add `openapi.json` and `api.types.ts` to `.gitignore` — both are generated.
+> Add `openapi.json` and `api.d.ts` to `.gitignore` — both are generated.
 
-**Prefer to keep it manual?** Skip `nodemon` and `npm-run-all2` entirely — just run the server with `node --watch src/server.ts` and regenerate types on demand with `openapi-typescript ./openapi.json -o ./api.types.ts` whenever you change your API.
+**Prefer to keep it manual?** Skip `nodemon` and `npm-run-all2` entirely — just run the server with `node --watch src/server.ts` and regenerate types on demand with `openapi-typescript ./openapi.json -o ./api.d.ts` whenever you change your API.
+
+> ⚠️ **Avoid a restart loop.** Write the generated `api.d.ts` **outside** the path your server watcher restarts on (or add it to the watcher's ignore list). If your server watches `*.ts` in `src/` and you output the types *into* `src/`, you get: type-gen writes `api.d.ts` → server restarts → spec rewrites → type-gen runs again → ♻️. Putting it in a separate folder (e.g. `shared/`, `generated/`) avoids this.
 
 ### Use with `openapi-fetch`
 
 ```ts
 import createClient from "openapi-fetch";
-import type { paths } from "./api.types";
+import type { paths } from "./api";
 
 const client = createClient<paths>({ baseUrl: "http://localhost:3000/api" });
 
@@ -367,7 +375,7 @@ const { data: user } = await client.POST("/users", {
 If you prefer not to add `openapi-fetch`, use the generated types directly with standard `fetch`:
 
 ```ts
-import type { paths } from "./api.types";
+import type { paths } from "./api";
 
 type Body<
   P extends keyof paths,

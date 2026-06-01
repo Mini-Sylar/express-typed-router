@@ -871,30 +871,68 @@ async function _resolveSchemaToJsonSchema(
 // merged with what we've seen before, so optional/nullable fields surface once
 // enough traffic has been seen.
 
-function inferJsonSchema(value: unknown): Record<string, any> {
+// Walk only a prefix of large arrays — enough to detect unions/nullable items
+// without paying O(n) merges per response on the hot path.
+const ARRAY_SAMPLE_LIMIT = 20;
+// Cap recursion so pathological nesting can never blow the stack.
+const INFER_MAX_DEPTH = 12;
+
+export function inferJsonSchema(value: unknown): Record<string, any> {
+  return inferSchema(value, 0, new WeakSet());
+}
+
+function inferSchema(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>
+): Record<string, any> {
   if (value === null || value === undefined) return { type: "null" };
+  if (depth >= INFER_MAX_DEPTH) return {};
+
+  // Match what res.json actually sends over the wire: JSON.stringify calls
+  // toJSON() (Date, Mongoose docs, Decimal, …), so infer from that form.
+  if (value instanceof Date) return { type: "string", format: "date-time" };
+  if (typeof value === "bigint") return { type: "integer" };
+  if (
+    typeof value === "object" &&
+    typeof (value as any).toJSON === "function"
+  ) {
+    return inferSchema((value as any).toJSON(), depth, seen);
+  }
+
   if (Array.isArray(value)) {
     if (value.length === 0) return { type: "array", items: {} };
-    let items: Record<string, any> = inferJsonSchema(value[0]);
-    for (let i = 1; i < value.length; i++) {
-      items = mergeJsonSchema(items, inferJsonSchema(value[i]));
+    if (seen.has(value)) return { type: "array", items: {} };
+    seen.add(value);
+    const n = Math.min(value.length, ARRAY_SAMPLE_LIMIT);
+    let items: Record<string, any> = inferSchema(value[0], depth + 1, seen);
+    for (let i = 1; i < n; i++) {
+      items = mergeJsonSchema(items, inferSchema(value[i], depth + 1, seen));
     }
+    seen.delete(value);
     return { type: "array", items };
   }
+
   switch (typeof value) {
     case "string":
       return { type: "string" };
     case "boolean":
       return { type: "boolean" };
     case "number":
-      return { type: Number.isInteger(value) ? "integer" : "number" };
+      return Number.isFinite(value)
+        ? { type: Number.isInteger(value) ? "integer" : "number" }
+        : { type: "null" }; // NaN/Infinity serialize to null
     case "object": {
+      if (seen.has(value as object)) return { type: "object" }; // cycle guard
+      seen.add(value as object);
       const properties: Record<string, any> = {};
       const required: string[] = [];
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-        properties[k] = inferJsonSchema(v);
+        if (typeof v === "function" || typeof v === "undefined") continue; // dropped by JSON
+        properties[k] = inferSchema(v, depth + 1, seen);
         required.push(k);
       }
+      seen.delete(value as object);
       const out: Record<string, any> = { type: "object", properties };
       if (required.length) out.required = required;
       return out;
@@ -1352,12 +1390,38 @@ export class TypedRouter<
     let scheduleWrite: (() => void) | undefined;
     if (options.specOutputPath) {
       const outPath = options.specOutputPath;
-      const writeSpec = async () => {
+      // Serialize writes so two overlapping calls can't interleave, and write
+      // atomically (temp file + rename) so a file-watcher never reads a
+      // half-written spec.
+      let writing = false;
+      let dirty = false;
+      const writeSpec = async (): Promise<void> => {
+        if (writing) {
+          dirty = true;
+          return;
+        }
+        writing = true;
         try {
           const spec = await buildOpenApiSpec(this.getRouteMetadata(), options);
           const fs = await _load("fs/promises");
-          await fs.writeFile(outPath, JSON.stringify(spec, null, 2), "utf8");
-        } catch {}
+          // Ensure the target directory exists so e.g. "./generated/openapi.json"
+          // doesn't silently fail when the folder isn't there. Cross-platform.
+          const dir = outPath.replace(/[/\\][^/\\]*$/, "");
+          if (dir && dir !== outPath) {
+            await fs.mkdir(dir, { recursive: true }).catch(() => {});
+          }
+          const pid = (globalThis as any).process?.pid ?? "0";
+          const tmp = `${outPath}.${pid}.tmp`;
+          await fs.writeFile(tmp, JSON.stringify(spec, null, 2), "utf8");
+          await fs.rename(tmp, outPath);
+        } catch {
+        } finally {
+          writing = false;
+          if (dirty) {
+            dirty = false;
+            void writeSpec(); // flush the change that arrived mid-write
+          }
+        }
       };
       let timer: ReturnType<typeof setTimeout> | undefined;
       scheduleWrite = () => {
