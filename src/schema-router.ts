@@ -152,6 +152,18 @@ import { SchemaError } from "@standard-schema/utils";
 // Any schema compatible with the Standard Schema v1 spec
 export type AnyStandardSchema = StandardSchemaV1<any, any>;
 
+// Schema shapes accepted as bodySchema/querySchema, matching what
+// safeParseSchema actually validates at runtime (Standard Schema first,
+// then Zod-like safeParse/parse, then a generic validate() fallback).
+// Constraining to this catches passing a non-schema value (e.g. a raw
+// field map instead of a compiled schema) at the call site instead of
+// validation silently failing at runtime.
+export type SchemaLike =
+  | AnyStandardSchema
+  | { safeParse: (...args: any[]) => any }
+  | { parse: (...args: any[]) => any }
+  | { validate: (...args: any[]) => any };
+
 // The router expects consumers to pass runtime objects that implement the
 // Standard Schema v1 interface (i.e. expose `schema['~standard'].validate`).
 // We do not add runtime shims or adapters here — upstream libraries should
@@ -592,20 +604,20 @@ type InferMiddlewareLocals<T extends readonly TypedMiddleware<any, any>[]> =
 // Enhanced Request type with proper inference
 export type SchemaRequest<
   Path extends string = string,
-  BodySchema extends AnyStandardSchema | unknown = unknown,
-  QuerySchema extends AnyStandardSchema | unknown = unknown,
+  BodySchema extends SchemaLike | undefined = undefined,
+  QuerySchema extends SchemaLike | undefined = undefined,
   MiddlewareProps extends Record<string, any> = {}
 > = Omit<Request, "params" | "query" | "body"> & {
   params: ExtractRouteParams<Path>;
-  body: BodySchema extends unknown ? InferSchemaOutput<BodySchema> : unknown;
-  query: QuerySchema extends unknown ? InferSchemaOutput<QuerySchema> : unknown;
+  body: BodySchema extends undefined ? unknown : InferSchemaOutput<BodySchema>;
+  query: QuerySchema extends undefined ? unknown : InferSchemaOutput<QuerySchema>;
 } & MiddlewareProps;
 
 // Route handler type
 export type SchemaRouteHandler<
   Path extends string = string,
-  BodySchema extends AnyStandardSchema | unknown = unknown,
-  QuerySchema extends AnyStandardSchema | unknown = unknown,
+  BodySchema extends SchemaLike | undefined = undefined,
+  QuerySchema extends SchemaLike | undefined = undefined,
   MiddlewareProps extends Record<string, any> = {},
   ResponseLocals extends Record<string, any> = {}
 > = (
@@ -630,8 +642,8 @@ export type SchemaRouteHandler<
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
 export interface RouteOptions<
-  BodySchema extends AnyStandardSchema | unknown = unknown,
-  QuerySchema extends AnyStandardSchema | unknown = unknown
+  BodySchema extends SchemaLike | undefined = undefined,
+  QuerySchema extends SchemaLike | undefined = undefined
 > {
   bodySchema?: BodySchema;
   querySchema?: QuerySchema;
@@ -649,7 +661,7 @@ export interface RouteOptions<
 // overloads so users can pass tags/summary/etc. alongside middleware: [...M]
 // without TypeScript's excess-property checking dropping the typed overload.
 type DocMeta = Pick<
-  RouteOptions<unknown, unknown>,
+  RouteOptions,
   "tags" | "summary" | "description" | "deprecated" | "responseSchema" | "hidden"
 >;
 
@@ -720,14 +732,14 @@ export interface DocsOptions {
 interface RouteMetadata {
   method: HttpMethod;
   path: string;
-  bodySchema?: AnyStandardSchema;
-  querySchema?: AnyStandardSchema;
-  tags?: string[];
-  description?: string;
-  summary?: string;
-  deprecated?: boolean;
-  responseSchema?: AnyStandardSchema;
-  hidden?: boolean;
+  bodySchema?: AnyStandardSchema | undefined;
+  querySchema?: AnyStandardSchema | undefined;
+  tags?: string[] | undefined;
+  description?: string | undefined;
+  summary?: string | undefined;
+  deprecated?: boolean | undefined;
+  responseSchema?: AnyStandardSchema | undefined;
+  hidden?: boolean | undefined;
   // Per status code: a JSON Schema inferred (and merged) from observed
   // responses, plus an optional real example (only in "live" mode).
   responseSamples: Map<number, { schema: Record<string, any>; example?: unknown }>;
@@ -1160,7 +1172,7 @@ export class TypedRouter<
   private sampleMode: "off" | "redacted" | "live" = "off";
   // When specOutputPath is set, this debounced writer rewrites the spec file as
   // newly observed response schemas come in, so file-watch type-gen stays fresh.
-  private scheduleSpecWrite?: () => void;
+  private scheduleSpecWrite?: (() => void) | undefined;
 
   constructor() {
     this.router = express.Router();
@@ -1483,58 +1495,33 @@ export class TypedRouter<
     path: Path,
     handler: SchemaRouteHandler<
       Path,
-      unknown,
-      unknown,
+      undefined,
+      undefined,
       Req,
       Locals
     >
   ): TypedRouter<Req, Locals>;
 
+  // Body/query schema and middleware live as flat sibling properties (not
+  // intersected with a separately-generic options type) so TS can infer
+  // BodySchema, QuerySchema, and M from the same object literal in one pass.
   get<
     Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Special overload for middleware type inference
-  get<
-    Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
-  >(
-    path: Path,
-    options: { middleware: Middleware },
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<Middleware>,
-      Locals & InferMiddlewareLocals<Middleware>
-    >
-  ): TypedRouter<Req, Locals>;
-  // Combined overload for body/query schema + middleware
-  get<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema> & { middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<Req, Locals>;
@@ -1546,89 +1533,30 @@ export class TypedRouter<
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
   } // Combined overload for body/query schema + middleware (most specific first)
+  post<Path extends string>(
+    path: Path,
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
   post<
     Path extends string,
-    BodySchema extends AnyStandardSchema,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
-      bodySchema: BodySchema;
+      bodySchema?: BodySchema;
       querySchema?: QuerySchema;
-      middleware: [...M]; // Using tuple spread pattern
+      middleware?: [...M];
     },
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<Req, Locals>;
-
-  // Body schema only + middleware
-  post<
-    Path extends string,
-    BodySchema extends AnyStandardSchema,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Middleware only
-  post<
-    Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Body + Query schema without middleware
-  post<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Just handler, no options
-  post<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
   post(
     path: string,
     optionsOrHandler: any,
@@ -1636,83 +1564,30 @@ export class TypedRouter<
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("post", path, optionsOrHandler, handler);
   }
-  // PUT method with all the same overloads as POST
+
+  // PUT method: same overload shape as POST
+  put<Path extends string>(
+    path: Path,
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
   put<
     Path extends string,
-    BodySchema extends AnyStandardSchema,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
-      bodySchema: BodySchema;
+      bodySchema?: BodySchema;
       querySchema?: QuerySchema;
-      middleware: [...M]; // Using tuple spread pattern
+      middleware?: [...M];
     },
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  put<
-    Path extends string,
-    BodySchema extends AnyStandardSchema,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  put<
-    Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  put<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  put<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   put(
@@ -1722,83 +1597,30 @@ export class TypedRouter<
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("put", path, optionsOrHandler, handler);
   }
-  // PATCH method with all the same overloads as POST
+
+  // PATCH method: same overload shape as POST
+  patch<Path extends string>(
+    path: Path,
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
   patch<
     Path extends string,
-    BodySchema extends AnyStandardSchema,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
-      bodySchema: BodySchema;
+      bodySchema?: BodySchema;
       querySchema?: QuerySchema;
-      middleware: [...M]; // Using tuple spread pattern
+      middleware?: [...M];
     },
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  patch<
-    Path extends string,
-    BodySchema extends AnyStandardSchema,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  patch<
-    Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  patch<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  patch<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   patch(
@@ -1807,69 +1629,29 @@ export class TypedRouter<
     handler?: any
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("patch", path, optionsOrHandler, handler);
-  } // DELETE method (typically no body, but can have query params and middleware)
-  // Most specific first: query schema + middleware
-  delete<
-    Path extends string,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
+  }
 
-  // Query schema only
-  delete<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
-    path: Path,
-    options: { querySchema: QuerySchema },
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Doc meta only (tags, summary, description, etc. — no schema or middleware)
+  // DELETE method: no bodySchema (typically no body)
   delete<Path extends string>(
     path: Path,
-    options: DocMeta,
-    handler: SchemaRouteHandler<Path, unknown, unknown, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
   ): TypedRouter<Req, Locals>;
-
-  // Middleware only
   delete<
     Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & {
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
     handler: SchemaRouteHandler<
       Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      undefined,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Basic overload with no options
-  delete<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   delete(
@@ -1878,69 +1660,29 @@ export class TypedRouter<
     handler?: any
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("delete", path, optionsOrHandler, handler);
-  } // OPTIONS method (typically no body, used for CORS preflight)
-  // Most specific first: query schema + middleware
-  options<
-    Path extends string,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
+  }
 
-  // Query schema only
-  options<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
-    path: Path,
-    options: { querySchema: QuerySchema },
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Doc meta only (tags, summary, description, etc. — no schema or middleware)
+  // OPTIONS method: no bodySchema (typically used for CORS preflight)
   options<Path extends string>(
     path: Path,
-    options: DocMeta,
-    handler: SchemaRouteHandler<Path, unknown, unknown, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
   ): TypedRouter<Req, Locals>;
-
-  // Middleware only
   options<
     Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & {
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
     handler: SchemaRouteHandler<
       Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      undefined,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Basic overload with no options
-  options<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   options(
@@ -1949,69 +1691,29 @@ export class TypedRouter<
     handler?: any
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("options", path, optionsOrHandler, handler);
-  } // HEAD method (like GET but only returns headers)
-  // Most specific first: query schema + middleware
-  head<
-    Path extends string,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
+  }
 
-  // Query schema only
-  head<Path extends string, QuerySchema extends AnyStandardSchema | unknown>(
-    path: Path,
-    options: { querySchema: QuerySchema },
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Doc meta only (tags, summary, description, etc. — no schema or middleware)
+  // HEAD method: no bodySchema (like GET but only returns headers)
   head<Path extends string>(
     path: Path,
-    options: DocMeta,
-    handler: SchemaRouteHandler<Path, unknown, unknown, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
   ): TypedRouter<Req, Locals>;
-
-  // Middleware only
   head<
     Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & {
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
     handler: SchemaRouteHandler<
       Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      undefined,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Basic overload with no options
-  head<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   head(
@@ -2020,105 +1722,31 @@ export class TypedRouter<
     handler?: any
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("head", path, optionsOrHandler, handler);
-  } // ALL method (matches all HTTP methods)
-  // Most specific first: body + query + middleware
+  }
+
+  // ALL method: same overload shape as POST (matches every HTTP method)
+  all<Path extends string>(
+    path: Path,
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
   all<
     Path extends string,
-    BodySchema extends AnyStandardSchema,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
-      bodySchema: BodySchema;
+      bodySchema?: BodySchema;
       querySchema?: QuerySchema;
-      middleware: [...M]; // Using tuple spread pattern
+      middleware?: [...M];
     },
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Body schema + middleware (no query)
-  all<
-    Path extends string,
-    BodySchema extends AnyStandardSchema,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { bodySchema: BodySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Query schema + middleware (no body)
-  all<
-    Path extends string,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { querySchema: QuerySchema; middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Body + query schemas (no middleware)
-  all<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Middleware only (no schemas)
-  all<
-    Path extends string,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: DocMeta & { middleware: [...M] }, // Using tuple spread pattern
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
-      Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-
-  // Basic overload with no options
-  all<Path extends string>(
-    path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   all(

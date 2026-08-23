@@ -1,5 +1,7 @@
 # @minisylar/express-typed-router
 
+[![Sponsor](https://img.shields.io/github/sponsors/Mini-Sylar)](https://github.com/sponsors/Mini-Sylar)
+
 A strongly typed Express router with **Standard Schema** validation, automatic type inference, and ✨ OpenAPI docs.
 
 Define routes once, infer `params` / `body` / `query`, and generate a clean API spec for docs or client generation.
