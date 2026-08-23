@@ -1,3 +1,16 @@
+## [1.9.4](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.3...v1.9.4) (2026-08-23)
+
+### Bug Fixes
+
+* consolidate get() overloads to fix middleware+schema type inference ([b7f6011](https://github.com/Mini-Sylar/express-typed-router/commit/b7f6011b91a2c2f371265979f04ac107f97323f5)), closes [#1](https://github.com/Mini-Sylar/express-typed-router/issues/1)
+* enforce real schemas for bodySchema/querySchema and consolidate all HTTP method overloads ([b44b8dd](https://github.com/Mini-Sylar/express-typed-router/commit/b44b8dd90336d6d027d5ebd4f1cd8a4d1b1645f8)), closes [#1](https://github.com/Mini-Sylar/express-typed-router/issues/1)
+* move get() schema-only overload to the end so it doesn't shadow middleware overloads ([fa5123d](https://github.com/Mini-Sylar/express-typed-router/commit/fa5123d94228202d35a7e147ccb16dacf835d465)), closes [#1](https://github.com/Mini-Sylar/express-typed-router/issues/1)
+* revert conventional-changelog-conventionalcommits to 9.3.1 ([97702ad](https://github.com/Mini-Sylar/express-typed-router/commit/97702ad8bdaf25573fb52cff3028cf59e27ba260))
+
+### Documentation
+
+* add GitHub Sponsors badge and FUNDING.yml ([da55327](https://github.com/Mini-Sylar/express-typed-router/commit/da5532755e66c496447299e1f1266804dca39909))
+
 ## [1.9.3](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.2...v1.9.3) (2026-06-01)
 
 ### Bug Fixes
