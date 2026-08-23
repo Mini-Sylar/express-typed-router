@@ -1490,53 +1490,27 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
 
-  // Special overload for middleware type inference
+  // Body/query schema and middleware live as flat sibling properties (not
+  // intersected with a separately-generic options type) so TS can infer
+  // BodySchema, QuerySchema, and M from the same object literal in one pass.
   get<
     Path extends string,
-    Middleware extends readonly TypedMiddleware<any, any>[]
+    BodySchema extends AnyStandardSchema | unknown = unknown,
+    QuerySchema extends AnyStandardSchema | unknown = unknown,
+    M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
-    options: { middleware: Middleware },
-    handler: SchemaRouteHandler<
-      Path,
-      unknown,
-      unknown,
-      Req & InferMiddlewareProps<Middleware>,
-      Locals & InferMiddlewareLocals<Middleware>
-    >
-  ): TypedRouter<Req, Locals>;
-  // Combined overload for body/query schema + middleware
-  get<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown,
-    M extends TypedMiddleware<any, any>[] // Using array type for JS compatibility
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema> & { middleware: [...M] }, // Using tuple spread pattern
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
     handler: SchemaRouteHandler<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
+      Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>
-    >
-  ): TypedRouter<Req, Locals>;
-  // Must stay last: RouteOptions.middleware also matches this overload structurally,
-  // so placed earlier it would shadow the middleware-aware overloads above.
-  get<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req,
-      Locals
     >
   ): TypedRouter<Req, Locals>;
   // Implementation
