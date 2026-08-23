@@ -1490,22 +1490,6 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
 
-  get<
-    Path extends string,
-    BodySchema extends AnyStandardSchema | unknown,
-    QuerySchema extends AnyStandardSchema | unknown
-  >(
-    path: Path,
-    options: RouteOptions<BodySchema, QuerySchema>,
-    handler: SchemaRouteHandler<
-      Path,
-      BodySchema,
-      QuerySchema,
-      Req,
-      Locals
-    >
-  ): TypedRouter<Req, Locals>;
-
   // Special overload for middleware type inference
   get<
     Path extends string,
@@ -1536,6 +1520,23 @@ export class TypedRouter<
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>, // Make it readonly for type inference
       Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  // Must stay last: RouteOptions.middleware also matches this overload structurally,
+  // so placed earlier it would shadow the middleware-aware overloads above.
+  get<
+    Path extends string,
+    BodySchema extends AnyStandardSchema | unknown,
+    QuerySchema extends AnyStandardSchema | unknown
+  >(
+    path: Path,
+    options: RouteOptions<BodySchema, QuerySchema>,
+    handler: SchemaRouteHandler<
+      Path,
+      BodySchema,
+      QuerySchema,
+      Req,
+      Locals
     >
   ): TypedRouter<Req, Locals>;
   // Implementation
