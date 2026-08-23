@@ -732,14 +732,14 @@ export interface DocsOptions {
 interface RouteMetadata {
   method: HttpMethod;
   path: string;
-  bodySchema?: AnyStandardSchema;
-  querySchema?: AnyStandardSchema;
-  tags?: string[];
-  description?: string;
-  summary?: string;
-  deprecated?: boolean;
-  responseSchema?: AnyStandardSchema;
-  hidden?: boolean;
+  bodySchema?: AnyStandardSchema | undefined;
+  querySchema?: AnyStandardSchema | undefined;
+  tags?: string[] | undefined;
+  description?: string | undefined;
+  summary?: string | undefined;
+  deprecated?: boolean | undefined;
+  responseSchema?: AnyStandardSchema | undefined;
+  hidden?: boolean | undefined;
   // Per status code: a JSON Schema inferred (and merged) from observed
   // responses, plus an optional real example (only in "live" mode).
   responseSamples: Map<number, { schema: Record<string, any>; example?: unknown }>;
@@ -1172,7 +1172,7 @@ export class TypedRouter<
   private sampleMode: "off" | "redacted" | "live" = "off";
   // When specOutputPath is set, this debounced writer rewrites the spec file as
   // newly observed response schemas come in, so file-watch type-gen stays fresh.
-  private scheduleSpecWrite?: () => void;
+  private scheduleSpecWrite?: (() => void) | undefined;
 
   constructor() {
     this.router = express.Router();
