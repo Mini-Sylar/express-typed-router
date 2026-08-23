@@ -13,6 +13,5 @@ export default defineConfig({
   treeshake: true,
   deps: {
     neverBundle: ["express", "@standard-schema/spec", "@standard-schema/utils"],
-    skipNodeModulesBundle: true,
   },
 });
