@@ -313,10 +313,30 @@ export function isSchemaError(error: unknown): error is { issues: any[] } {
  * - Optional parameters: /posts/:year/:month? → { year: string; month?: string }
  * - Wildcard parameters: /files/* → { "0": string }
  * - Multiple wildcards: /a/star/b/star → { "0": string; "1": string }
+ *
+ * A path containing a named regex capture group — `(?<id>...)` — is treated
+ * as a raw regex pattern instead: /^\/legacy\/(?<id>\d+)$/ → { id: string }.
+ * This syntax never appears in Express's own path syntax, so detecting it is
+ * unambiguous; registerRoute converts the string to a real RegExp at
+ * runtime so Express matches it as one.
  */
 export type ExtractRouteParams<Path extends string> = string extends Path
   ? Record<string, string>
+  : Path extends `${infer _Before}(?<${infer _Name}>${infer _Rest}`
+  ? ExtractRegexGroupParams<Path>
   : ExtractParams<Path>;
+
+type ExtractRegexGroupParams<S extends string> =
+  S extends `${infer _Before}(?<${infer Name}>${infer _Rest}`
+    ? { [K in Name]: string } & ExtractRegexGroupParams<RemoveFirstRegexGroup<S>>
+    : {};
+
+type RemoveFirstRegexGroup<S extends string> =
+  S extends `${infer _Before}(?<${infer _Name}>${infer After}`
+    ? After extends `${infer _Inner})${infer Rest}`
+      ? Rest
+      : ""
+    : "";
 
 /**
  * Main parameter extraction logic - enhanced for Express 5 support with recursion depth limit
@@ -646,6 +666,12 @@ export interface RouteOptions<
   QuerySchema extends SchemaLike | undefined = undefined
 > {
   bodySchema?: BodySchema;
+  /**
+   * Every value here arrives as a string, never a real boolean/number —
+   * `z.coerce.boolean()` treats `"false"` as truthy. Use a text-aware parser
+   * like `z.stringbool()` for boolean fields.
+   * @see https://github.com/Mini-Sylar/express-typed-router#gotchas
+   */
   querySchema?: QuerySchema;
   middleware?: TypedMiddleware<any, any>[];
   tags?: string[];
@@ -655,6 +681,13 @@ export interface RouteOptions<
   responseSchema?: AnyStandardSchema;
   /** Exclude this route from the generated OpenAPI spec entirely. */
   hidden?: boolean;
+  /**
+   * Only used when `path` is a `RegExp`. A readable stand-in path (e.g.
+   * `/legacy/:id`) for the OpenAPI doc, since one can't be derived from a
+   * `RegExp` value. Defaults to `regex.toString()`. Doc-only — `req.params`
+   * always types as `Record<string, string>` for RegExp routes.
+   */
+  pathExample?: string;
 }
 
 // Doc-only fields extracted from RouteOptions — merged into typed middleware
@@ -662,7 +695,13 @@ export interface RouteOptions<
 // without TypeScript's excess-property checking dropping the typed overload.
 type DocMeta = Pick<
   RouteOptions,
-  "tags" | "summary" | "description" | "deprecated" | "responseSchema" | "hidden"
+  | "tags"
+  | "summary"
+  | "description"
+  | "deprecated"
+  | "responseSchema"
+  | "hidden"
+  | "pathExample"
 >;
 
 // HTTP methods
@@ -731,7 +770,9 @@ export interface DocsOptions {
 
 interface RouteMetadata {
   method: HttpMethod;
-  path: string;
+  path: string | RegExp;
+  /** Doc-only path override for RegExp routes — see RouteOptions.pathExample. */
+  pathExample?: string | undefined;
   bodySchema?: AnyStandardSchema | undefined;
   querySchema?: AnyStandardSchema | undefined;
   tags?: string[] | undefined;
@@ -775,6 +816,37 @@ async function importDynamic(mod: string): Promise<any> {
 // Schemas are immutable objects — cache conversion results by identity
 const _schemaJsonCache = new WeakMap<object, Record<string, any>>();
 
+// A string path containing a named regex capture group — (?<id>...) — isn't
+// Express path syntax; Express's own string parser doesn't understand it.
+// Convert it to a real RegExp before Express ever sees it. This syntax never
+// appears in legitimate Express paths, so detecting it is unambiguous.
+const NAMED_REGEX_GROUP = /\(\?<[^>]+>/;
+
+function toExpressPath(path: string | RegExp): string | RegExp {
+  return typeof path === "string" && NAMED_REGEX_GROUP.test(path)
+    ? new RegExp(path)
+    : path;
+}
+
+// Resolves any route's path into an Express-style string — :name and
+// (?<name>...) tokens alike — so callers can feed it straight into
+// expressPathToOpenApi/extractPathParamNames/autoTag/autoSummary without a
+// separate RegExp code path. A RegExp with no pathExample is synthesized
+// from its source: unnamed capturing groups become positional :0, :1, ...
+// matching how Express itself numbers them in req.params, so the doc always
+// reflects what a request actually gets — never route.toString()'s raw dump.
+function resolveDocPath(route: {
+  path: string | RegExp;
+  pathExample?: string | undefined;
+}): string {
+  if (typeof route.path === "string") return route.path;
+  if (route.pathExample) return route.pathExample;
+  let index = 0;
+  return route.path.source
+    .replace(/\\\//g, "/")
+    .replace(/\((?!\?)[^()]*\)/g, () => `:${index++}`);
+}
+
 function expressPathToOpenApi(path: string): string {
   return (
     path
@@ -783,6 +855,10 @@ function expressPathToOpenApi(path: string): string {
       // `:name`, optionally with a regex constraint `(...)` and a `?`/`+`/`*`
       // modifier → OpenAPI `{name}`.
       .replace(/:([A-Za-z0-9_]+)(?:\([^)]*\))?[?+*]?/g, "{$1}")
+      // Named regex capture group `(?<name>...)` → OpenAPI `{name}`.
+      .replace(/\(\?<([A-Za-z0-9_]+)>[^)]*\)/g, "{$1}")
+      // Regex anchors have no meaning in an OpenAPI path.
+      .replace(/^\^|\$$/g, "")
       // Brace removal can leave `//` (e.g. `/x{/:id}` → `/x//...`); collapse it.
       .replace(/\/{2,}/g, "/")
   );
@@ -790,23 +866,32 @@ function expressPathToOpenApi(path: string): string {
 
 function extractPathParamNames(path: string): string[] {
   const stripped = path.replace(/\{([^{}]*)\}/g, "$1");
-  return [...stripped.matchAll(/:([A-Za-z0-9_]+)/g)].map((m) => m[1]!);
+  return [
+    ...stripped.matchAll(/:([A-Za-z0-9_]+)/g),
+    ...stripped.matchAll(/\(\?<([A-Za-z0-9_]+)>/g),
+  ].map((m) => m[1]!);
+}
+
+function isParamSegment(s: string): boolean {
+  return s.startsWith(":") || s.startsWith("*") || s.includes("(?<");
 }
 
 function autoTag(path: string): string {
   const first = path
+    .replace(/^\^|\$$/g, "")
     .replace(/[{}]/g, "")
     .split("/")
     .filter(Boolean)
-    .find((s) => !s.startsWith(":") && !s.startsWith("*"));
+    .find((s) => !isParamSegment(s));
   return first ?? "default";
 }
 
 function autoSummary(method: string, path: string): string {
   const segments = path
+    .replace(/^\^|\$$/g, "")
     .replace(/[{}]/g, "")
     .split("/")
-    .filter((s) => s && !s.startsWith(":") && !s.startsWith("*"));
+    .filter((s) => s && !isParamSegment(s));
   const resource = segments[segments.length - 1] ?? "resource";
   const prefix: Record<string, string> = {
     get: "Get",
@@ -1036,17 +1121,16 @@ async function buildOpenApiSpec(
   for (const route of routes) {
     if (route.method === "all" || route.hidden) continue;
 
-    const openApiPath = expressPathToOpenApi(route.path);
+    const docPath = resolveDocPath(route);
+    const openApiPath = expressPathToOpenApi(docPath);
     if (!paths[openApiPath]) paths[openApiPath] = {};
 
-    const parameters: any[] = extractPathParamNames(route.path).map(
-      (name) => ({
-        name,
-        in: "path",
-        required: true,
-        schema: { type: "string" },
-      })
-    );
+    const parameters: any[] = extractPathParamNames(docPath).map((name) => ({
+      name,
+      in: "path",
+      required: true,
+      schema: { type: "string" },
+    }));
 
     if (route.querySchema) {
       const qs = await trySchemaToJsonSchema(route.querySchema);
@@ -1063,8 +1147,8 @@ async function buildOpenApiSpec(
     }
 
     const operation: Record<string, any> = {
-      summary: route.summary ?? autoSummary(route.method, route.path),
-      tags: route.tags ?? [autoTag(route.path)],
+      summary: route.summary ?? autoSummary(route.method, docPath),
+      tags: route.tags ?? [autoTag(docPath)],
       parameters,
     };
 
@@ -1308,7 +1392,10 @@ export class TypedRouter<
     const mounted = this.mountedRouters.flatMap(({ prefix, router }) =>
       router.getRouteMetadata().map((meta) => ({
         ...meta,
-        path: prefix + meta.path,
+        // Can't string-concat a prefix onto a RegExp; prefix pathExample instead.
+        ...(typeof meta.path === "string"
+          ? { path: prefix + meta.path }
+          : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
       }))
     );
     return [...this.routes, ...mounted];
@@ -1363,7 +1450,8 @@ export class TypedRouter<
     visited.add(this);
     const paths = spec?.paths ?? {};
     for (const route of this.routes) {
-      const op = paths[expressPathToOpenApi(prefix + route.path)]?.[route.method];
+      const key = expressPathToOpenApi(prefix + resolveDocPath(route));
+      const op = paths[key]?.[route.method];
       const responses = op?.responses;
       if (!responses) continue;
       for (const status of Object.keys(responses)) {
@@ -1525,9 +1613,34 @@ export class TypedRouter<
       Locals & InferMiddlewareLocals<readonly [...M]>
     >
   ): TypedRouter<Req, Locals>;
+  // RegExp path — Express doesn't expose named params for a raw RegExp, so
+  // params always type as Record<string, string>.
+  get(
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  get<
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      BodySchema,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
   // Implementation
   get(
-    path: string,
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1558,7 +1671,30 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   post(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  post<
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      BodySchema,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  post(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1591,7 +1727,30 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   put(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  put<
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      BodySchema,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  put(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1624,7 +1783,30 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   patch(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  patch<
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      BodySchema,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  patch(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1655,7 +1837,28 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   delete(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  delete<
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      undefined,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  delete(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1686,7 +1889,28 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   options(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  options<
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      undefined,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  options(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1717,7 +1941,28 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   head(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  head<
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      undefined,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  head(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1750,7 +1995,30 @@ export class TypedRouter<
     >
   ): TypedRouter<Req, Locals>;
   all(
-    path: string,
+    path: RegExp,
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+  ): TypedRouter<Req, Locals>;
+  all<
+    BodySchema extends SchemaLike | undefined = undefined,
+    QuerySchema extends SchemaLike | undefined = undefined,
+    M extends TypedMiddleware<any, any>[] = []
+  >(
+    path: RegExp,
+    options: DocMeta & {
+      bodySchema?: BodySchema;
+      querySchema?: QuerySchema;
+      middleware?: [...M];
+    },
+    handler: SchemaRouteHandler<
+      string,
+      BodySchema,
+      QuerySchema,
+      Req & InferMiddlewareProps<readonly [...M]>,
+      Locals & InferMiddlewareLocals<readonly [...M]>
+    >
+  ): TypedRouter<Req, Locals>;
+  all(
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1759,7 +2027,7 @@ export class TypedRouter<
   // Helper method to register routes
   private registerRoute(
     method: HttpMethod,
-    path: string,
+    path: string | RegExp,
     optionsOrHandler: any,
     handler?: any
   ): TypedRouter<Req, Locals> {
@@ -1778,6 +2046,7 @@ export class TypedRouter<
       meta.deprecated = options.deprecated;
       meta.responseSchema = options.responseSchema;
       meta.hidden = options.hidden;
+      meta.pathExample = options.pathExample;
 
       if (options.middleware) {
         middlewares.push(...options.middleware);
@@ -1862,7 +2131,7 @@ export class TypedRouter<
       next();
     };
 
-    (this.router as any)[method](path, interceptor, ...middlewares);
+    (this.router as any)[method](toExpressPath(path), interceptor, ...middlewares);
 
     return this;
   }
@@ -2094,7 +2363,9 @@ export function createDocs(
       const mergedRoutes: RouteMetadata[] = entries.flatMap(({ prefix, router }) =>
         router.getRouteMetadata().map((meta) => ({
           ...meta,
-          path: prefix + meta.path,
+          ...(typeof meta.path === "string"
+            ? { path: prefix + meta.path }
+            : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
         }))
       );
       const spec = await buildOpenApiSpec(mergedRoutes, options);
