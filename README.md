@@ -493,6 +493,40 @@ app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 
 ---
 
+## Gotchas
+
+### `querySchema` booleans: `req.query.flag` is text, not a real boolean
+
+Query strings have no wire format for booleans — `?flag=false` arrives at your schema as the *string* `"false"`, no matter what the client intended. This isn't specific to this library; it's true of every Express app, but it trips people up specifically when picking a schema for `querySchema`:
+
+```ts
+router.get(
+  "/search",
+  { querySchema: z.object({ flag: z.boolean() }) }, // ❌ always rejects
+  handler,
+);
+```
+
+`z.boolean()` rejects **every** request here, since `typeof "false" !== "boolean"` — it fails before it even looks at the text.
+
+The obvious fix has its own trap:
+
+```ts
+{ querySchema: z.object({ flag: z.coerce.boolean() }) } // ❌ silently wrong
+```
+
+`z.coerce.boolean()` does plain JS `Boolean(value)` — and `Boolean("false")` is `true`, because any non-empty string is truthy in JavaScript. `?flag=false` stops erroring and instead silently becomes `true`.
+
+Use a schema that actually parses the text:
+
+```ts
+{ querySchema: z.object({ flag: z.stringbool() }) } // ✅ zod v4+
+```
+
+`z.stringbool()` parses `"true"`/`"false"` (and a few common variants) into the correct boolean. This isn't an express-typed-router limitation to work around — the router runs whatever schema you give it exactly as written; the fix is picking the right schema primitive, not something the router could safely guess on your behalf.
+
+---
+
 ## API surface
 
 |                                          |                                                  |
