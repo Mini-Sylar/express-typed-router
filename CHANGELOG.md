@@ -1,3 +1,11 @@
+## [1.9.5](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.4...v1.9.5) (2026-08-24)
+
+### Bug Fixes
+
+* accept RegExp route paths ([#6](https://github.com/Mini-Sylar/express-typed-router/issues/6)) ([3d2c6f5](https://github.com/Mini-Sylar/express-typed-router/commit/3d2c6f5642860a952b65c4fee786861efdc9cf39))
+* add paramsSchema for validating and typing route params ([569cb32](https://github.com/Mini-Sylar/express-typed-router/commit/569cb32ca029240608c3016850ae42bb588406ba))
+* resolve optional peer deps relative to entry script, not just cwd ([3769fa8](https://github.com/Mini-Sylar/express-typed-router/commit/3769fa8f81c304a150a492be864c096e4bf1bea3))
+
 ## [1.9.4](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.3...v1.9.4) (2026-08-23)
 
 ### Bug Fixes
