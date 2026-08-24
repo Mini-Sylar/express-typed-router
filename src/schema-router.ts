@@ -815,20 +815,37 @@ const _load = new Function("m", "return import(m)") as (m: string) => Promise<an
 let _nodeModule: any;
 let _nodeUrl: any;
 
-// Resolves optional peer deps (zod, valibot, etc.) starting from the process's
-// working directory so Node.js walks the user's node_modules tree rather than
-// looking relative to this library file's own installed location.
+// Resolves optional peer deps (zod, valibot, etc.) from the user's own
+// node_modules tree rather than looking relative to this library file's own
+// installed location — pnpm's isolated node_modules mode means peer deps
+// aren't necessarily reachable from there. process.cwd() alone isn't
+// reliable either: it's wherever the process happened to be launched from
+// (a monorepo root, a Docker WORKDIR, a process manager's configured cwd),
+// which often differs from the directory holding the app's own
+// node_modules. process.argv[1] — the actual entry script Node was told to
+// run — reliably points there regardless of launch cwd, so it's tried first;
+// cwd remains a fallback for contexts where argv[1] isn't meaningful (e.g.
+// a REPL).
 async function importDynamic(mod: string): Promise<any> {
-  try {
-    _nodeModule ??= await _load("module");
-    _nodeUrl ??= await _load("url");
-    const cwd: string = (globalThis as any).process?.cwd?.() ?? "";
-    const req = _nodeModule.createRequire(_nodeUrl.pathToFileURL(cwd + "/").href);
-    const resolved: string = req.resolve(mod);
-    return _load(_nodeUrl.pathToFileURL(resolved).href);
-  } catch {
-    return _load(mod);
+  _nodeModule ??= await _load("module");
+  _nodeUrl ??= await _load("url");
+
+  const bases: string[] = [];
+  const argv1: string | undefined = (globalThis as any).process?.argv?.[1];
+  if (argv1) bases.push(_nodeUrl.pathToFileURL(argv1).href);
+  const cwd: string = (globalThis as any).process?.cwd?.() ?? "";
+  if (cwd) bases.push(_nodeUrl.pathToFileURL(cwd + "/").href);
+
+  for (const base of bases) {
+    try {
+      const req = _nodeModule.createRequire(base);
+      const resolved: string = req.resolve(mod);
+      return await _load(_nodeUrl.pathToFileURL(resolved).href);
+    } catch {
+      // Try the next resolution base.
+    }
   }
+  return _load(mod);
 }
 
 // Schemas are immutable objects — cache conversion results by identity
