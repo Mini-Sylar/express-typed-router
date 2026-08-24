@@ -621,14 +621,19 @@ type InferMiddlewareLocals<T extends readonly TypedMiddleware<any, any>[]> =
       : {}
     : {};
 
-// Enhanced Request type with proper inference
+// Enhanced Request type with proper inference. ParamsSchema is last (and
+// defaulted) so existing 4-arg call sites don't need updating — only the
+// overloads that actually accept a paramsSchema option pass a 5th argument.
 export type SchemaRequest<
   Path extends string = string,
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
-  MiddlewareProps extends Record<string, any> = {}
+  MiddlewareProps extends Record<string, any> = {},
+  ParamsSchema extends SchemaLike | undefined = undefined
 > = Omit<Request, "params" | "query" | "body"> & {
-  params: ExtractRouteParams<Path>;
+  params: ParamsSchema extends undefined
+    ? ExtractRouteParams<Path>
+    : InferSchemaOutput<ParamsSchema>;
   body: BodySchema extends undefined ? unknown : InferSchemaOutput<BodySchema>;
   query: QuerySchema extends undefined ? unknown : InferSchemaOutput<QuerySchema>;
 } & MiddlewareProps;
@@ -639,9 +644,10 @@ export type SchemaRouteHandler<
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
   MiddlewareProps extends Record<string, any> = {},
-  ResponseLocals extends Record<string, any> = {}
+  ResponseLocals extends Record<string, any> = {},
+  ParamsSchema extends SchemaLike | undefined = undefined
 > = (
-  req: SchemaRequest<Path, BodySchema, QuerySchema, MiddlewareProps>,
+  req: SchemaRequest<Path, BodySchema, QuerySchema, MiddlewareProps, ParamsSchema>,
   res: Response<any, ResponseLocals>,
   next?: NextFunction
 ) =>
@@ -657,13 +663,16 @@ export type SchemaRouteHandler<
  *
  * @template BodySchema - Schema for request body validation.
  * @template QuerySchema - Schema for query parameter validation.
+ * @template ParamsSchema - Schema for route param validation.
  * @property bodySchema - Optional schema for validating the request body.
  * @property querySchema - Optional schema for validating the query string.
+ * @property paramsSchema - Optional schema for validating route params.
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
 export interface RouteOptions<
   BodySchema extends SchemaLike | undefined = undefined,
-  QuerySchema extends SchemaLike | undefined = undefined
+  QuerySchema extends SchemaLike | undefined = undefined,
+  ParamsSchema extends SchemaLike | undefined = undefined
 > {
   bodySchema?: BodySchema;
   /**
@@ -673,6 +682,13 @@ export interface RouteOptions<
    * @see https://github.com/Mini-Sylar/express-typed-router#gotchas
    */
   querySchema?: QuerySchema;
+  /**
+   * Overrides the inferred `req.params` type with this schema's output —
+   * useful for coercing a numeric-looking param (`z.coerce.number()`) since
+   * Express never converts params from strings on its own. Same
+   * string-arrival caveat as `querySchema` applies; see its docs above.
+   */
+  paramsSchema?: ParamsSchema;
   middleware?: TypedMiddleware<any, any>[];
   tags?: string[];
   description?: string;
@@ -685,7 +701,8 @@ export interface RouteOptions<
    * Only used when `path` is a `RegExp`. A readable stand-in path (e.g.
    * `/legacy/:id`) for the OpenAPI doc, since one can't be derived from a
    * `RegExp` value. Defaults to `regex.toString()`. Doc-only — `req.params`
-   * always types as `Record<string, string>` for RegExp routes.
+   * types as `Record<string, string>` for RegExp routes unless overridden
+   * by `paramsSchema`.
    */
   pathExample?: string;
 }
@@ -775,6 +792,7 @@ interface RouteMetadata {
   pathExample?: string | undefined;
   bodySchema?: AnyStandardSchema | undefined;
   querySchema?: AnyStandardSchema | undefined;
+  paramsSchema?: AnyStandardSchema | undefined;
   tags?: string[] | undefined;
   description?: string | undefined;
   summary?: string | undefined;
@@ -1125,12 +1143,25 @@ async function buildOpenApiSpec(
     const openApiPath = expressPathToOpenApi(docPath);
     if (!paths[openApiPath]) paths[openApiPath] = {};
 
-    const parameters: any[] = extractPathParamNames(docPath).map((name) => ({
-      name,
-      in: "path",
-      required: true,
-      schema: { type: "string" },
-    }));
+    let parameters: any[];
+    if (route.paramsSchema) {
+      const ps = await trySchemaToJsonSchema(route.paramsSchema);
+      const props: Record<string, any> = ps.properties ?? {};
+      const required: string[] = ps.required ?? [];
+      parameters = Object.entries(props).map(([name, propSchema]) => ({
+        name,
+        in: "path",
+        required: required.includes(name),
+        schema: propSchema,
+      }));
+    } else {
+      parameters = extractPathParamNames(docPath).map((name) => ({
+        name,
+        in: "path",
+        required: true,
+        schema: { type: "string" },
+      }));
+    }
 
     if (route.querySchema) {
       const qs = await trySchemaToJsonSchema(route.querySchema);
@@ -1597,12 +1628,14 @@ export class TypedRouter<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1610,7 +1643,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
@@ -1622,12 +1656,14 @@ export class TypedRouter<
   get<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1635,7 +1671,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   // Implementation
@@ -1654,12 +1691,14 @@ export class TypedRouter<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1667,7 +1706,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   post(
@@ -1677,12 +1717,14 @@ export class TypedRouter<
   post<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1690,7 +1732,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   post(
@@ -1710,12 +1753,14 @@ export class TypedRouter<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1723,7 +1768,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   put(
@@ -1733,12 +1779,14 @@ export class TypedRouter<
   put<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1746,7 +1794,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   put(
@@ -1766,12 +1815,14 @@ export class TypedRouter<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1779,7 +1830,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   patch(
@@ -1789,12 +1841,14 @@ export class TypedRouter<
   patch<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1802,7 +1856,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   patch(
@@ -1821,11 +1876,13 @@ export class TypedRouter<
   delete<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1833,7 +1890,8 @@ export class TypedRouter<
       undefined,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   delete(
@@ -1842,11 +1900,13 @@ export class TypedRouter<
   ): TypedRouter<Req, Locals>;
   delete<
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1854,7 +1914,8 @@ export class TypedRouter<
       undefined,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   delete(
@@ -1873,11 +1934,13 @@ export class TypedRouter<
   options<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1885,7 +1948,8 @@ export class TypedRouter<
       undefined,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   options(
@@ -1894,11 +1958,13 @@ export class TypedRouter<
   ): TypedRouter<Req, Locals>;
   options<
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1906,7 +1972,8 @@ export class TypedRouter<
       undefined,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   options(
@@ -1925,11 +1992,13 @@ export class TypedRouter<
   head<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1937,7 +2006,8 @@ export class TypedRouter<
       undefined,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   head(
@@ -1946,11 +2016,13 @@ export class TypedRouter<
   ): TypedRouter<Req, Locals>;
   head<
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1958,7 +2030,8 @@ export class TypedRouter<
       undefined,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   head(
@@ -1978,12 +2051,14 @@ export class TypedRouter<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: Path,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -1991,7 +2066,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   all(
@@ -2001,12 +2077,14 @@ export class TypedRouter<
   all<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
+    ParamsSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = []
   >(
     path: RegExp,
     options: DocMeta & {
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
+      paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
     handler: SchemaRouteHandler<
@@ -2014,7 +2092,8 @@ export class TypedRouter<
       BodySchema,
       QuerySchema,
       Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>
+      Locals & InferMiddlewareLocals<readonly [...M]>,
+      ParamsSchema
     >
   ): TypedRouter<Req, Locals>;
   all(
@@ -2036,10 +2115,11 @@ export class TypedRouter<
     this.routes.push(meta);
 
     if (typeof optionsOrHandler === "object") {
-      const options = optionsOrHandler as RouteOptions<any, any>;
+      const options = optionsOrHandler as RouteOptions<any, any, any>;
 
       meta.bodySchema = options.bodySchema as AnyStandardSchema | undefined;
       meta.querySchema = options.querySchema as AnyStandardSchema | undefined;
+      meta.paramsSchema = options.paramsSchema as AnyStandardSchema | undefined;
       meta.tags = options.tags;
       meta.description = options.description;
       meta.summary = options.summary;
@@ -2059,6 +2139,11 @@ export class TypedRouter<
       if (options.querySchema) {
         middlewares.push(
           this.createQueryValidationMiddleware(options.querySchema)
+        );
+      }
+      if (options.paramsSchema) {
+        middlewares.push(
+          this.createParamsValidationMiddleware(options.paramsSchema)
         );
       }
       middlewares.push(handler);
@@ -2152,6 +2237,37 @@ export class TypedRouter<
           return;
         }
         req.body = resolved && "value" in resolved ? resolved.value : resolved;
+        next();
+      } catch (error) {
+        if (isSchemaError(error)) {
+          res.status(400).json({
+            error: "Validation failed",
+            details: (error as any).errors || (error as any).issues,
+          });
+        } else {
+          next(error);
+        }
+      }
+    };
+  }
+  private createParamsValidationMiddleware(schema: any) {
+    return async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const result = safeParseSchema(schema, req.params) as any;
+        const resolved =
+          result && typeof (result as Promise<any>).then === "function"
+            ? await result
+            : result;
+        if (resolved && "issues" in resolved && resolved.issues) {
+          res.status(400).json({
+            error: "Validation failed",
+            details: resolved.errors || resolved.issues,
+          });
+          return;
+        }
+        // Unlike req.query, req.params is a plain writable own property in
+        // Express 5 — no Object.defineProperty workaround needed here.
+        req.params = resolved && "value" in resolved ? resolved.value : resolved;
         next();
       } catch (error) {
         if (isSchemaError(error)) {
