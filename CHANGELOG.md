@@ -1,3 +1,9 @@
+## [1.9.7](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.6...v1.9.7) (2026-08-25)
+
+### Bug Fixes
+
+* **types:** prevent schema inference from reusable handlers ([7497157](https://github.com/Mini-Sylar/express-typed-router/commit/7497157aa296aaa79f399e84188ec7578fb54c48))
+
 ## [1.9.6](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.5...v1.9.6) (2026-08-25)
 
 ### Bug Fixes
