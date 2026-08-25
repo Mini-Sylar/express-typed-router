@@ -778,6 +778,23 @@ export type InferSchemaHandler<Options extends InferSchemaHandlerOptions = {}> =
     Record<string, string | string[] | undefined>
   >;
 
+type RouteHandlerFromOptions<
+  Path extends string,
+  BodySchema extends SchemaLike | undefined,
+  QuerySchema extends SchemaLike | undefined,
+  ParamsSchema extends SchemaLike | undefined,
+  RouterReq extends Record<string, any>,
+  RouterLocals extends Record<string, any>,
+  M extends TypedMiddleware<any, any>[],
+> = SchemaRouteHandler<
+  Path,
+  NoInfer<BodySchema>,
+  NoInfer<QuerySchema>,
+  RouterReq & InferMiddlewareProps<readonly [...M]>,
+  RouterLocals & InferMiddlewareLocals<readonly [...M]>,
+  NoInfer<ParamsSchema>
+>;
+
 // Doc-only fields extracted from RouteOptions — merged into typed middleware
 // overloads so users can pass tags/summary/etc. alongside middleware: [...M]
 // without TypeScript's excess-property checking dropping the typed overload.
@@ -1852,13 +1869,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
@@ -1880,13 +1898,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   // Implementation
@@ -1915,13 +1934,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   post(
@@ -1941,13 +1961,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   post(
@@ -1977,13 +1998,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   put(
@@ -2003,13 +2025,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   put(
@@ -2039,13 +2062,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   patch(
@@ -2065,13 +2089,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   patch(
@@ -2099,13 +2124,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       undefined,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   delete(
@@ -2123,13 +2149,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       undefined,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   delete(
@@ -2157,13 +2184,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       undefined,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   options(
@@ -2181,13 +2209,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       undefined,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   options(
@@ -2215,13 +2244,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       undefined,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   head(
@@ -2239,13 +2269,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       undefined,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   head(
@@ -2275,13 +2306,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       Path,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   all(
@@ -2301,13 +2333,14 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       middleware?: [...M];
     },
-    handler: SchemaRouteHandler<
+    handler: RouteHandlerFromOptions<
       string,
       BodySchema,
       QuerySchema,
-      Req & InferMiddlewareProps<readonly [...M]>,
-      Locals & InferMiddlewareLocals<readonly [...M]>,
-      ParamsSchema
+      ParamsSchema,
+      Req,
+      Locals,
+      M
     >,
   ): TypedRouter<Req, Locals>;
   all(
