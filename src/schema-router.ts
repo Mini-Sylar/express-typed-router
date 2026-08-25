@@ -188,13 +188,13 @@ type InferFromSafeParse<T> = T extends {
   ? R extends { success: true; data: infer O }
     ? O
     : R extends Promise<infer PR>
-    ? PR extends { success: true; data: infer O }
-      ? O
+      ? PR extends { success: true; data: infer O }
+        ? O
+        : never
       : never
-    : never
   : T extends { parse: (...args: any[]) => infer R }
-  ? R
-  : never;
+    ? R
+    : never;
 
 // Canonical inference used by the router: prefer Standard Schema inference,
 // otherwise fall back to Zod-like (`safeParse`/`parse`). We deliberately
@@ -221,7 +221,7 @@ export function parseSchema<T>(schema: T, data: unknown): InferSchemaOutput<T> {
     const result = anySchema["~standard"].validate(data);
     if (result instanceof Promise) {
       throw new TypeError(
-        "Async schema validation is not supported by parseSchema"
+        "Async schema validation is not supported by parseSchema",
       );
     }
     if (result.issues) {
@@ -246,7 +246,7 @@ export type SafeParseResult<T> =
 
 export function safeParseSchema<T>(
   schema: T,
-  data: unknown
+  data: unknown,
 ): SafeParseResult<T> {
   // At runtime we only accept Standard Schema-compatible objects that expose
   // `schema['~standard'].validate`. This keeps runtime behavior strict and
@@ -323,12 +323,14 @@ export function isSchemaError(error: unknown): error is { issues: any[] } {
 export type ExtractRouteParams<Path extends string> = string extends Path
   ? Record<string, string>
   : Path extends `${infer _Before}(?<${infer _Name}>${infer _Rest}`
-  ? ExtractRegexGroupParams<Path>
-  : ExtractParams<Path>;
+    ? ExtractRegexGroupParams<Path>
+    : ExtractParams<Path>;
 
 type ExtractRegexGroupParams<S extends string> =
   S extends `${infer _Before}(?<${infer Name}>${infer _Rest}`
-    ? { [K in Name]: string } & ExtractRegexGroupParams<RemoveFirstRegexGroup<S>>
+    ? { [K in Name]: string } & ExtractRegexGroupParams<
+        RemoveFirstRegexGroup<S>
+      >
     : {};
 
 type RemoveFirstRegexGroup<S extends string> =
@@ -347,51 +349,53 @@ type ExtractParams<Path extends string> =
     ? ExtractOptionalSegment<OptionalContent> &
         ExtractParams<`${Before}${After}`>
     : // Handle named parameters :paramName
-    Path extends `${infer _Before}:${infer Rest}`
-    ? ExtractSingleParam<Rest> & ExtractParams<RemoveFirstParam<Path>>
-    : // Handle wildcards *
-    // Named wildcard like *splat (path-to-regexp v8) - capture name up to common delimiters
-    Path extends `${infer _Before}*${infer Name}/${infer After}`
-    ? Name extends ""
-      ? {
-          [K in CountWildcards<_Before, "0">]: string;
-        } & ExtractParams<`/${After}`>
-      : { [K in Name]: string[] } & ExtractParams<`/${After}`>
-    : Path extends `${infer _Before}*${infer Name}-${infer After}`
-    ? Name extends ""
-      ? {
-          [K in CountWildcards<_Before, "0">]: string;
-        } & ExtractParams<`-${After}`>
-      : { [K in Name]: string[] } & ExtractParams<`-${After}`>
-    : Path extends `${infer _Before}*${infer Name}.${infer After}`
-    ? Name extends ""
-      ? {
-          [K in CountWildcards<_Before, "0">]: string;
-        } & ExtractParams<`.${After}`>
-      : { [K in Name]: string[] } & ExtractParams<`.${After}`>
-    : Path extends `${infer _Before}*${infer Name}#${infer After}`
-    ? Name extends ""
-      ? {
-          [K in CountWildcards<_Before, "0">]: string;
-        } & ExtractParams<`#${After}`>
-      : { [K in Name]: string[] } & ExtractParams<`#${After}`>
-    : Path extends `${infer _Before}*${infer Name}:${infer After}`
-    ? Name extends ""
-      ? {
-          [K in CountWildcards<_Before, "0">]: string;
-        } & ExtractParams<`:${After}`>
-      : { [K in Name]: string[] } & ExtractParams<`:${After}`>
-    : Path extends `${infer _Before}*${infer Name}`
-    ? Name extends ""
-      ? { [K in CountWildcards<_Before, "0">]: string } & ExtractParams<``>
-      : { [K in Name]: string[] } & ExtractParams<``>
-    : // Fallback anonymous wildcard (legacy Express 4 style) - numeric index
-    Path extends `${infer _Before}*${infer After}`
-    ? {
-        [K in CountWildcards<_Before, "0">]: string;
-      } & ExtractParams<After>
-    : // No more parameters
-      {};
+      Path extends `${infer _Before}:${infer Rest}`
+      ? ExtractSingleParam<Rest> & ExtractParams<RemoveFirstParam<Path>>
+      : // Handle wildcards *
+        // Named wildcard like *splat (path-to-regexp v8) - capture name up to common delimiters
+        Path extends `${infer _Before}*${infer Name}/${infer After}`
+        ? Name extends ""
+          ? {
+              [K in CountWildcards<_Before, "0">]: string;
+            } & ExtractParams<`/${After}`>
+          : { [K in Name]: string[] } & ExtractParams<`/${After}`>
+        : Path extends `${infer _Before}*${infer Name}-${infer After}`
+          ? Name extends ""
+            ? {
+                [K in CountWildcards<_Before, "0">]: string;
+              } & ExtractParams<`-${After}`>
+            : { [K in Name]: string[] } & ExtractParams<`-${After}`>
+          : Path extends `${infer _Before}*${infer Name}.${infer After}`
+            ? Name extends ""
+              ? {
+                  [K in CountWildcards<_Before, "0">]: string;
+                } & ExtractParams<`.${After}`>
+              : { [K in Name]: string[] } & ExtractParams<`.${After}`>
+            : Path extends `${infer _Before}*${infer Name}#${infer After}`
+              ? Name extends ""
+                ? {
+                    [K in CountWildcards<_Before, "0">]: string;
+                  } & ExtractParams<`#${After}`>
+                : { [K in Name]: string[] } & ExtractParams<`#${After}`>
+              : Path extends `${infer _Before}*${infer Name}:${infer After}`
+                ? Name extends ""
+                  ? {
+                      [K in CountWildcards<_Before, "0">]: string;
+                    } & ExtractParams<`:${After}`>
+                  : { [K in Name]: string[] } & ExtractParams<`:${After}`>
+                : Path extends `${infer _Before}*${infer Name}`
+                  ? Name extends ""
+                    ? {
+                        [K in CountWildcards<_Before, "0">]: string;
+                      } & ExtractParams<``>
+                    : { [K in Name]: string[] } & ExtractParams<``>
+                  : // Fallback anonymous wildcard (legacy Express 4 style) - numeric index
+                    Path extends `${infer _Before}*${infer After}`
+                    ? {
+                        [K in CountWildcards<_Before, "0">]: string;
+                      } & ExtractParams<After>
+                    : // No more parameters
+                      {};
 
 /**
  * Extract parameters from Express 5 optional segments in braces
@@ -404,21 +408,21 @@ type ExtractOptionalSegment<Content extends string> =
       ? {}
       : { [K in Name]?: string[] }
     : Content extends `/${infer Rest}`
-    ? Rest extends `*${infer Name}`
-      ? Name extends ""
-        ? {}
-        : { [K in Name]?: string[] }
-      : Rest extends `:${infer R}`
-      ? ExtractOptionalParam<R>
-      : {}
-    : // Handle optional parameter patterns like /:param or .:param or path:param
-    Content extends `/:${infer Rest}`
-    ? ExtractOptionalParam<Rest>
-    : Content extends `.:${infer Rest}`
-    ? ExtractOptionalParam<Rest>
-    : Content extends `${infer _Path}:${infer Rest}`
-    ? ExtractOptionalParam<Rest>
-    : {};
+      ? Rest extends `*${infer Name}`
+        ? Name extends ""
+          ? {}
+          : { [K in Name]?: string[] }
+        : Rest extends `:${infer R}`
+          ? ExtractOptionalParam<R>
+          : {}
+      : // Handle optional parameter patterns like /:param or .:param or path:param
+        Content extends `/:${infer Rest}`
+        ? ExtractOptionalParam<Rest>
+        : Content extends `.:${infer Rest}`
+          ? ExtractOptionalParam<Rest>
+          : Content extends `${infer _Path}:${infer Rest}`
+            ? ExtractOptionalParam<Rest>
+            : {};
 
 /**
  * Extract a single optional parameter from brace content
@@ -427,12 +431,12 @@ type ExtractOptionalParam<Rest extends string> =
   Rest extends `${infer ParamName}/${infer _After}`
     ? { [K in ParamName]?: string }
     : Rest extends `${infer ParamName}-${infer _After}`
-    ? { [K in ParamName]?: string }
-    : Rest extends `${infer ParamName}.${infer _After}`
-    ? { [K in ParamName]?: string }
-    : Rest extends `${infer ParamName}`
-    ? { [K in ParamName]?: string }
-    : {};
+      ? { [K in ParamName]?: string }
+      : Rest extends `${infer ParamName}.${infer _After}`
+        ? { [K in ParamName]?: string }
+        : Rest extends `${infer ParamName}`
+          ? { [K in ParamName]?: string }
+          : {};
 
 /**
  * Extract a single parameter name from the rest of the path
@@ -445,50 +449,50 @@ type ExtractSingleParam<Rest extends string> =
   Rest extends `${infer ParamName}(${infer _Constraint})${infer _After}`
     ? { [K in ParamName]: string } // Handle consecutive parameters with separators first: param-:nextParam
     : Rest extends `${infer ParamName}-:${infer _NextParam}`
-    ? { [K in ParamName]: string }
-    : Rest extends `${infer ParamName}.:${infer _NextParam}`
-    ? { [K in ParamName]: string }
-    : // Handle optional parameters followed by delimiters (before regular delimiters)
-    Rest extends `${infer ParamName}?/${infer _After}`
-    ? { [K in ParamName]?: string }
-    : Rest extends `${infer ParamName}?-${infer _After}`
-    ? { [K in ParamName]?: string }
-    : Rest extends `${infer ParamName}?.${infer _After}`
-    ? { [K in ParamName]?: string }
-    : Rest extends `${infer ParamName}?#${infer _After}`
-    ? { [K in ParamName]?: string }
-    : Rest extends `${infer ParamName}?:${infer _After}`
-    ? { [K in ParamName]?: string }
-    : // Then handle regular delimiters (after optional parameter patterns)
-    Rest extends `${infer ParamName}/${infer _After}`
-    ? { [K in ParamName]: string }
-    : Rest extends `${infer ParamName}-${infer _After}`
-    ? { [K in ParamName]: string }
-    : Rest extends `${infer ParamName}.${infer _After}`
-    ? { [K in ParamName]: string }
-    : Rest extends `${infer ParamName}#${infer _After}`
-    ? { [K in ParamName]: string }
-    : Rest extends `${infer ParamName}:${infer _After}`
-    ? { [K in ParamName]: string }
-    : // Handle Express 5 repeating parameters (after regular delimiters)
-    Rest extends `${infer ParamName}+${infer _After}`
-    ? { [K in ParamName]: string[] }
-    : Rest extends `${infer ParamName}*${infer _After}`
-    ? { [K in ParamName]?: string[] }
-    : // Handle optional parameters with ? (Express 4) - only at the end of a segment
-    Rest extends `${infer ParamName}?${infer _After}`
-    ? { [K in ParamName]?: string } // Parameter at absolute end of string
-    : Rest extends string
-    ? Rest extends ""
-      ? {}
-      : Rest extends `${infer ParamName}?`
-      ? { [K in ParamName]?: string } // ParamName here doesn't include the ?
-      : Rest extends `${infer ParamName}+`
-      ? { [K in ParamName]: string[] }
-      : Rest extends `${infer ParamName}*`
-      ? { [K in ParamName]?: string[] }
-      : { [K in Rest]: string }
-    : {};
+      ? { [K in ParamName]: string }
+      : Rest extends `${infer ParamName}.:${infer _NextParam}`
+        ? { [K in ParamName]: string }
+        : // Handle optional parameters followed by delimiters (before regular delimiters)
+          Rest extends `${infer ParamName}?/${infer _After}`
+          ? { [K in ParamName]?: string }
+          : Rest extends `${infer ParamName}?-${infer _After}`
+            ? { [K in ParamName]?: string }
+            : Rest extends `${infer ParamName}?.${infer _After}`
+              ? { [K in ParamName]?: string }
+              : Rest extends `${infer ParamName}?#${infer _After}`
+                ? { [K in ParamName]?: string }
+                : Rest extends `${infer ParamName}?:${infer _After}`
+                  ? { [K in ParamName]?: string }
+                  : // Then handle regular delimiters (after optional parameter patterns)
+                    Rest extends `${infer ParamName}/${infer _After}`
+                    ? { [K in ParamName]: string }
+                    : Rest extends `${infer ParamName}-${infer _After}`
+                      ? { [K in ParamName]: string }
+                      : Rest extends `${infer ParamName}.${infer _After}`
+                        ? { [K in ParamName]: string }
+                        : Rest extends `${infer ParamName}#${infer _After}`
+                          ? { [K in ParamName]: string }
+                          : Rest extends `${infer ParamName}:${infer _After}`
+                            ? { [K in ParamName]: string }
+                            : // Handle Express 5 repeating parameters (after regular delimiters)
+                              Rest extends `${infer ParamName}+${infer _After}`
+                              ? { [K in ParamName]: string[] }
+                              : Rest extends `${infer ParamName}*${infer _After}`
+                                ? { [K in ParamName]?: string[] }
+                                : // Handle optional parameters with ? (Express 4) - only at the end of a segment
+                                  Rest extends `${infer ParamName}?${infer _After}`
+                                  ? { [K in ParamName]?: string } // Parameter at absolute end of string
+                                  : Rest extends string
+                                    ? Rest extends ""
+                                      ? {}
+                                      : Rest extends `${infer ParamName}?`
+                                        ? { [K in ParamName]?: string } // ParamName here doesn't include the ?
+                                        : Rest extends `${infer ParamName}+`
+                                          ? { [K in ParamName]: string[] }
+                                          : Rest extends `${infer ParamName}*`
+                                            ? { [K in ParamName]?: string[] }
+                                            : { [K in Rest]: string }
+                                    : {};
 
 /**
  * Remove the first parameter from path to continue parsing
@@ -502,40 +506,40 @@ type RemoveFirstParam<Path extends string> =
       Rest extends `${infer _ParamName}(${infer _Constraint})${infer After}`
       ? `${Before}${After}` // Handle consecutive parameters: :param-:nextParam -> -:nextParam
       : Rest extends `${infer _ParamName}-:${infer After}`
-      ? `${Before}-:${After}`
-      : Rest extends `${infer _ParamName}.:${infer After}`
-      ? `${Before}.:${After}`
-      : // Handle optional parameters followed by delimiters (before regular delimiters)
-      Rest extends `${infer _ParamName}?/${infer After}`
-      ? `${Before}/${After}`
-      : Rest extends `${infer _ParamName}?-${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}?.${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}?#${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}?:${infer After}`
-      ? `${Before}:${After}`
-      : // Handle regular separators (after optional parameter patterns)
-      Rest extends `${infer _ParamName}/${infer After}`
-      ? `${Before}/${After}`
-      : Rest extends `${infer _ParamName}-${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}.${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}#${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}:${infer After}`
-      ? `${Before}:${After}`
-      : // Handle Express 5 repeating parameters (after regular separators)
-      Rest extends `${infer _ParamName}+${infer After}`
-      ? `${Before}${After}`
-      : Rest extends `${infer _ParamName}*${infer After}`
-      ? `${Before}${After}`
-      : // Handle optional parameters with ?
-      Rest extends `${infer _ParamName}?${infer After}`
-      ? `${Before}${After}`
-      : Before
+        ? `${Before}-:${After}`
+        : Rest extends `${infer _ParamName}.:${infer After}`
+          ? `${Before}.:${After}`
+          : // Handle optional parameters followed by delimiters (before regular delimiters)
+            Rest extends `${infer _ParamName}?/${infer After}`
+            ? `${Before}/${After}`
+            : Rest extends `${infer _ParamName}?-${infer After}`
+              ? `${Before}${After}`
+              : Rest extends `${infer _ParamName}?.${infer After}`
+                ? `${Before}${After}`
+                : Rest extends `${infer _ParamName}?#${infer After}`
+                  ? `${Before}${After}`
+                  : Rest extends `${infer _ParamName}?:${infer After}`
+                    ? `${Before}:${After}`
+                    : // Handle regular separators (after optional parameter patterns)
+                      Rest extends `${infer _ParamName}/${infer After}`
+                      ? `${Before}/${After}`
+                      : Rest extends `${infer _ParamName}-${infer After}`
+                        ? `${Before}${After}`
+                        : Rest extends `${infer _ParamName}.${infer After}`
+                          ? `${Before}${After}`
+                          : Rest extends `${infer _ParamName}#${infer After}`
+                            ? `${Before}${After}`
+                            : Rest extends `${infer _ParamName}:${infer After}`
+                              ? `${Before}:${After}`
+                              : // Handle Express 5 repeating parameters (after regular separators)
+                                Rest extends `${infer _ParamName}+${infer After}`
+                                ? `${Before}${After}`
+                                : Rest extends `${infer _ParamName}*${infer After}`
+                                  ? `${Before}${After}`
+                                  : // Handle optional parameters with ?
+                                    Rest extends `${infer _ParamName}?${infer After}`
+                                    ? `${Before}${After}`
+                                    : Before
     : Path;
 
 /**
@@ -543,7 +547,7 @@ type RemoveFirstParam<Path extends string> =
  */
 type CountWildcards<
   Path extends string,
-  Count extends string = "0"
+  Count extends string = "0",
 > = Path extends `${infer _Before}*${infer Rest}`
   ? CountWildcards<Rest, IncrementWildcard<Count>>
   : Count;
@@ -554,22 +558,22 @@ type CountWildcards<
 type IncrementWildcard<T extends string> = T extends "0"
   ? "1"
   : T extends "1"
-  ? "2"
-  : T extends "2"
-  ? "3"
-  : T extends "3"
-  ? "4"
-  : T extends "4"
-  ? "5"
-  : T extends "5"
-  ? "6"
-  : T extends "6"
-  ? "7"
-  : T extends "7"
-  ? "8"
-  : T extends "8"
-  ? "9"
-  : "10"; // Reasonable limit for wildcards
+    ? "2"
+    : T extends "2"
+      ? "3"
+      : T extends "3"
+        ? "4"
+        : T extends "4"
+          ? "5"
+          : T extends "5"
+            ? "6"
+            : T extends "6"
+              ? "7"
+              : T extends "7"
+                ? "8"
+                : T extends "8"
+                  ? "9"
+                  : "10"; // Reasonable limit for wildcards
 
 /**
  * Express middleware that adds custom properties to the request object and/or response locals.
@@ -582,11 +586,11 @@ type IncrementWildcard<T extends string> = T extends "0"
  */
 export type TypedMiddleware<
   TReq extends Record<string, any> = {},
-  TLocals extends Record<string, any> = {}
+  TLocals extends Record<string, any> = {},
 > = (
   req: Request & TReq,
   res: Response<any, TLocals>,
-  next: NextFunction
+  next: NextFunction,
 ) => void | Promise<void>;
 
 /**
@@ -629,13 +633,18 @@ export type SchemaRequest<
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
   MiddlewareProps extends Record<string, any> = {},
-  ParamsSchema extends SchemaLike | undefined = undefined
+  ParamsSchema extends SchemaLike | undefined = undefined,
+  ParamsOverride extends Record<string, any> | undefined = undefined,
 > = Omit<Request, "params" | "query" | "body"> & {
-  params: ParamsSchema extends undefined
-    ? ExtractRouteParams<Path>
-    : InferSchemaOutput<ParamsSchema>;
+  params: ParamsOverride extends undefined
+    ? ParamsSchema extends undefined
+      ? ExtractRouteParams<Path>
+      : InferSchemaOutput<ParamsSchema>
+    : ParamsOverride;
   body: BodySchema extends undefined ? unknown : InferSchemaOutput<BodySchema>;
-  query: QuerySchema extends undefined ? unknown : InferSchemaOutput<QuerySchema>;
+  query: QuerySchema extends undefined
+    ? unknown
+    : InferSchemaOutput<QuerySchema>;
 } & MiddlewareProps;
 
 // Route handler type
@@ -645,11 +654,19 @@ export type SchemaRouteHandler<
   QuerySchema extends SchemaLike | undefined = undefined,
   MiddlewareProps extends Record<string, any> = {},
   ResponseLocals extends Record<string, any> = {},
-  ParamsSchema extends SchemaLike | undefined = undefined
+  ParamsSchema extends SchemaLike | undefined = undefined,
+  ParamsOverride extends Record<string, any> | undefined = undefined,
 > = (
-  req: SchemaRequest<Path, BodySchema, QuerySchema, MiddlewareProps, ParamsSchema>,
+  req: SchemaRequest<
+    Path,
+    BodySchema,
+    QuerySchema,
+    MiddlewareProps,
+    ParamsSchema,
+    ParamsOverride
+  >,
   res: Response<any, ResponseLocals>,
-  next?: NextFunction
+  next?: NextFunction,
 ) =>
   | void
   | undefined
@@ -672,7 +689,7 @@ export type SchemaRouteHandler<
 export interface RouteOptions<
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
-  ParamsSchema extends SchemaLike | undefined = undefined
+  ParamsSchema extends SchemaLike | undefined = undefined,
 > {
   bodySchema?: BodySchema;
   /**
@@ -706,6 +723,60 @@ export interface RouteOptions<
    */
   pathExample?: string;
 }
+
+/**
+ * The route options accepted by {@link InferSchemaHandler}.
+ *
+ * This is derived from {@link RouteOptions}, so adding a route option keeps
+ * this helper's accepted shape in sync automatically. Middleware may be
+ * written as a single middleware type for reusable handlers, or as the tuple
+ * passed to a route.
+ */
+export type InferSchemaHandlerOptions = Partial<
+  Omit<RouteOptions<any, any, any>, "middleware">
+> & {
+  middleware?: TypedMiddleware<any, any> | readonly TypedMiddleware<any, any>[];
+};
+
+type NormalizeHandlerMiddleware<Middleware> =
+  Middleware extends TypedMiddleware<any, any>
+    ? readonly [Middleware]
+    : Middleware extends readonly TypedMiddleware<any, any>[]
+      ? Middleware
+      : readonly [];
+
+type InferHandlerOption<
+  Options extends InferSchemaHandlerOptions,
+  Key extends "bodySchema" | "querySchema" | "paramsSchema" | "middleware",
+> = Key extends keyof Options ? Options[Key] : undefined;
+
+/**
+ * Infer a reusable route handler from the same options passed to a route.
+ *
+ * The path is intentionally `string` because the handler can be registered
+ * for multiple paths. Use `paramsSchema` when those paths share a validated
+ * params shape that should be reflected in the handler type.
+ *
+ * @example
+ * type ListenHandler = InferSchemaHandler<{
+ *   bodySchema: typeof ListenSchema;
+ *   middleware: typeof auth;
+ * }>;
+ */
+export type InferSchemaHandler<Options extends InferSchemaHandlerOptions = {}> =
+  SchemaRouteHandler<
+    string,
+    InferHandlerOption<Options, "bodySchema">,
+    InferHandlerOption<Options, "querySchema">,
+    InferMiddlewareProps<
+      NormalizeHandlerMiddleware<InferHandlerOption<Options, "middleware">>
+    >,
+    InferMiddlewareLocals<
+      NormalizeHandlerMiddleware<InferHandlerOption<Options, "middleware">>
+    >,
+    InferHandlerOption<Options, "paramsSchema">,
+    Record<string, string | string[] | undefined>
+  >;
 
 // Doc-only fields extracted from RouteOptions — merged into typed middleware
 // overloads so users can pass tags/summary/etc. alongside middleware: [...M]
@@ -801,7 +872,10 @@ interface RouteMetadata {
   hidden?: boolean | undefined;
   // Per status code: a JSON Schema inferred (and merged) from observed
   // responses, plus an optional real example (only in "live" mode).
-  responseSamples: Map<number, { schema: Record<string, any>; example?: unknown }>;
+  responseSamples: Map<
+    number,
+    { schema: Record<string, any>; example?: unknown }
+  >;
 }
 
 // Routes all dynamic imports through new Function to keep the source free of
@@ -809,7 +883,9 @@ interface RouteMetadata {
 // bundlers from statically analysing and inlining optional peer deps.
 // `m` is ALWAYS one of our own hardcoded module names — never user input —
 // so there is no eval-like injection risk here despite what SAST tools may flag.
-const _load = new Function("m", "return import(m)") as (m: string) => Promise<any>;
+const _load = new Function("m", "return import(m)") as (
+  m: string,
+) => Promise<any>;
 
 // Cached after first use — built-in modules never change
 let _nodeModule: any;
@@ -882,6 +958,105 @@ function resolveDocPath(route: {
     .replace(/\((?!\?)[^()]*\)/g, () => `:${index++}`);
 }
 
+// Split only on alternation operators that are outside nested groups and
+// character classes. This deliberately handles the useful route-shaped regex
+// subset without pretending to be a general-purpose regular-expression parser.
+function splitRegexAlternatives(source: string): string[] {
+  const alternatives: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") {
+      inClass = true;
+      continue;
+    }
+    if (char === "]") {
+      inClass = false;
+      continue;
+    }
+    if (inClass) continue;
+    if (char === "(") depth++;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if (char === "|" && depth === 0) {
+      alternatives.push(source.slice(start, i));
+      start = i + 1;
+    }
+  }
+
+  alternatives.push(source.slice(start));
+  return alternatives.length > 1 ? alternatives : [source];
+}
+
+function unwrapRegexGroup(source: string): string {
+  if (!source.startsWith("(") || !source.endsWith(")")) return source;
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") inClass = true;
+    else if (char === "]") inClass = false;
+    else if (!inClass && char === "(") depth++;
+    else if (!inClass && char === ")") {
+      depth--;
+      if (depth === 0 && i !== source.length - 1) return source;
+    }
+  }
+  return source.slice(1, -1).replace(/^\?:/, "");
+}
+
+function regexAlternativeToDocPath(source: string): string {
+  let index = 0;
+  return (
+    unwrapRegexGroup(source)
+      .replace(/^\^|\$$/g, "")
+      // A route regex commonly escapes slashes because it is written as a
+      // literal. They are ordinary path separators in OpenAPI.
+      .replace(/\\\//g, "/")
+      // An arbitrary suffix is represented by one readable path parameter.
+      .replace(/\.\*|\.\+/g, "/:path")
+      // A trailing slash marker does not need a separate OpenAPI path.
+      .replace(/\/?\?$/, "")
+      // Preserve named captures and give unnamed captures stable positional
+      // names, matching Express's req.params convention.
+      .replace(/\(\?<([A-Za-z0-9_]+)>[^()]*\)/g, ":$1")
+      .replace(/\((?!\?)[^()]*\)/g, () => `:${index++}`)
+  );
+}
+
+function resolveDocPaths(route: {
+  path: string | RegExp;
+  pathExample?: string | undefined;
+}): string[] {
+  if (typeof route.path === "string" || route.pathExample) {
+    return [resolveDocPath(route)];
+  }
+
+  const alternatives = splitRegexAlternatives(route.path.source);
+  if (alternatives.length === 1) return [resolveDocPath(route)];
+  return alternatives.map(regexAlternativeToDocPath);
+}
+
 function expressPathToOpenApi(path: string): string {
   return (
     path
@@ -941,7 +1116,7 @@ function autoSummary(method: string, path: string): string {
 }
 
 async function trySchemaToJsonSchema(
-  schema: AnyStandardSchema
+  schema: AnyStandardSchema,
 ): Promise<Record<string, any>> {
   const cached = _schemaJsonCache.get(schema as object);
   if (cached) return cached;
@@ -951,7 +1126,7 @@ async function trySchemaToJsonSchema(
 }
 
 async function _resolveSchemaToJsonSchema(
-  schema: AnyStandardSchema
+  schema: AnyStandardSchema,
 ): Promise<Record<string, any>> {
   // ArkType exposes toJsonSchema() directly on the type object
   if (typeof (schema as any).toJsonSchema === "function") {
@@ -990,7 +1165,8 @@ async function _resolveSchemaToJsonSchema(
     try {
       const mod = await importDynamic("effect");
       const make = mod.JSONSchema?.make ?? mod.default?.JSONSchema?.make;
-      if (typeof make === "function") return make(schema) as Record<string, any>;
+      if (typeof make === "function")
+        return make(schema) as Record<string, any>;
     } catch {}
   }
 
@@ -1016,7 +1192,7 @@ export function inferJsonSchema(value: unknown): Record<string, any> {
 function inferSchema(
   value: unknown,
   depth: number,
-  seen: WeakSet<object>
+  seen: WeakSet<object>,
 ): Record<string, any> {
   if (value === null || value === undefined) return { type: "null" };
   if (depth >= INFER_MAX_DEPTH) return {};
@@ -1089,7 +1265,7 @@ function collapseTypes(types: Set<string>): string | string[] | undefined {
 
 function mergeJsonSchema(
   a: Record<string, any> | undefined,
-  b: Record<string, any> | undefined
+  b: Record<string, any> | undefined,
 ): Record<string, any> {
   if (!a || Object.keys(a).length === 0) return b ?? {};
   if (!b || Object.keys(b).length === 0) return a ?? {};
@@ -1103,7 +1279,10 @@ function mergeJsonSchema(
     const aProps: Record<string, any> = a.properties ?? {};
     const bProps: Record<string, any> = b.properties ?? {};
     const props: Record<string, any> = {};
-    for (const key of new Set([...Object.keys(aProps), ...Object.keys(bProps)])) {
+    for (const key of new Set([
+      ...Object.keys(aProps),
+      ...Object.keys(bProps),
+    ])) {
       props[key] = mergeJsonSchema(aProps[key], bProps[key]);
     }
     merged.properties = props;
@@ -1149,102 +1328,103 @@ function scalarHtml(title: string, specUrl: string, cdnUrl: string): string {
 
 async function buildOpenApiSpec(
   routes: RouteMetadata[],
-  options: DocsOptions
+  options: DocsOptions,
 ): Promise<Record<string, any>> {
   const paths: Record<string, any> = Object.create(null);
 
   for (const route of routes) {
     if (route.method === "all" || route.hidden) continue;
 
-    const docPath = resolveDocPath(route);
-    const openApiPath = expressPathToOpenApi(docPath);
-    if (!paths[openApiPath]) paths[openApiPath] = {};
+    for (const docPath of resolveDocPaths(route)) {
+      const openApiPath = expressPathToOpenApi(docPath);
+      if (!paths[openApiPath]) paths[openApiPath] = {};
 
-    let parameters: any[];
-    if (route.paramsSchema) {
-      const ps = await trySchemaToJsonSchema(route.paramsSchema);
-      const props: Record<string, any> = ps.properties ?? {};
-      const required: string[] = ps.required ?? [];
-      parameters = Object.entries(props).map(([name, propSchema]) => ({
-        name,
-        in: "path",
-        required: required.includes(name),
-        schema: propSchema,
-      }));
-    } else {
-      parameters = extractPathParamNames(docPath).map((name) => ({
-        name,
-        in: "path",
-        required: true,
-        schema: { type: "string" },
-      }));
-    }
-
-    if (route.querySchema) {
-      const qs = await trySchemaToJsonSchema(route.querySchema);
-      const props: Record<string, any> = qs.properties ?? {};
-      const required: string[] = qs.required ?? [];
-      for (const [name, propSchema] of Object.entries(props)) {
-        parameters.push({
+      let parameters: any[];
+      if (route.paramsSchema) {
+        const ps = await trySchemaToJsonSchema(route.paramsSchema);
+        const props: Record<string, any> = ps.properties ?? {};
+        const required: string[] = ps.required ?? [];
+        parameters = Object.entries(props).map(([name, propSchema]) => ({
           name,
-          in: "query",
+          in: "path",
           required: required.includes(name),
           schema: propSchema,
-        });
+        }));
+      } else {
+        parameters = extractPathParamNames(docPath).map((name) => ({
+          name,
+          in: "path",
+          required: true,
+          schema: { type: "string" },
+        }));
       }
-    }
 
-    const operation: Record<string, any> = {
-      summary: route.summary ?? autoSummary(route.method, docPath),
-      tags: route.tags ?? [autoTag(docPath)],
-      parameters,
-    };
-
-    if (route.description) operation.description = route.description;
-    if (route.deprecated) operation.deprecated = true;
-
-    if (route.bodySchema) {
-      const bs = await trySchemaToJsonSchema(route.bodySchema);
-      operation.requestBody = {
-        required: true,
-        content: { "application/json": { schema: bs } },
-      };
-    }
-
-    const responses: Record<string, any> = {};
-    // Inferred-from-traffic schemas (best-effort, may be stale).
-    for (const [status, sample] of route.responseSamples) {
-      const json: Record<string, any> = { schema: sample.schema };
-      if (sample.example !== undefined) json.example = sample.example;
-      responses[String(status)] = {
-        description: status < 400 ? "Success" : "Error",
-        content: { "application/json": json },
-      };
-    }
-    // A declared responseSchema is the source of truth — it wins over inference
-    // for the success response (no staleness, reflects current code exactly).
-    if (route.responseSchema) {
-      const declared = await trySchemaToJsonSchema(route.responseSchema);
-      if (declared && Object.keys(declared).length) {
-        let successStatus = "200";
-        for (const code of route.responseSamples.keys()) {
-          if (code >= 200 && code < 300) {
-            successStatus = String(code);
-            break;
-          }
+      if (route.querySchema) {
+        const qs = await trySchemaToJsonSchema(route.querySchema);
+        const props: Record<string, any> = qs.properties ?? {};
+        const required: string[] = qs.required ?? [];
+        for (const [name, propSchema] of Object.entries(props)) {
+          parameters.push({
+            name,
+            in: "query",
+            required: required.includes(name),
+            schema: propSchema,
+          });
         }
-        responses[successStatus] = {
-          description: "Success",
-          content: { "application/json": { schema: declared } },
+      }
+
+      const operation: Record<string, any> = {
+        summary: route.summary ?? autoSummary(route.method, docPath),
+        tags: route.tags ?? [autoTag(docPath)],
+        parameters,
+      };
+
+      if (route.description) operation.description = route.description;
+      if (route.deprecated) operation.deprecated = true;
+
+      if (route.bodySchema) {
+        const bs = await trySchemaToJsonSchema(route.bodySchema);
+        operation.requestBody = {
+          required: true,
+          content: { "application/json": { schema: bs } },
         };
       }
-    }
-    if (Object.keys(responses).length === 0) {
-      responses["200"] = { description: "Success" };
-    }
-    operation.responses = responses;
 
-    paths[openApiPath][route.method] = operation;
+      const responses: Record<string, any> = {};
+      // Inferred-from-traffic schemas (best-effort, may be stale).
+      for (const [status, sample] of route.responseSamples) {
+        const json: Record<string, any> = { schema: sample.schema };
+        if (sample.example !== undefined) json.example = sample.example;
+        responses[String(status)] = {
+          description: status < 400 ? "Success" : "Error",
+          content: { "application/json": json },
+        };
+      }
+      // A declared responseSchema is the source of truth — it wins over inference
+      // for the success response (no staleness, reflects current code exactly).
+      if (route.responseSchema) {
+        const declared = await trySchemaToJsonSchema(route.responseSchema);
+        if (declared && Object.keys(declared).length) {
+          let successStatus = "200";
+          for (const code of route.responseSamples.keys()) {
+            if (code >= 200 && code < 300) {
+              successStatus = String(code);
+              break;
+            }
+          }
+          responses[successStatus] = {
+            description: "Success",
+            content: { "application/json": { schema: declared } },
+          };
+        }
+      }
+      if (Object.keys(responses).length === 0) {
+        responses["200"] = { description: "Success" };
+      }
+      operation.responses = responses;
+
+      paths[openApiPath][route.method] = operation;
+    }
   }
 
   return {
@@ -1292,11 +1472,14 @@ export type AdditionalLocals = {};
  */
 export class TypedRouter<
   Req extends Record<string, any> = AdditionalReqProps,
-  Locals extends Record<string, any> = AdditionalLocals
+  Locals extends Record<string, any> = AdditionalLocals,
 > {
   private router: express.Router;
   private routes: RouteMetadata[] = [];
-  private mountedRouters: Array<{ prefix: string; router: TypedRouter<any, any> }> = [];
+  private mountedRouters: Array<{
+    prefix: string;
+    router: TypedRouter<any, any>;
+  }> = [];
   // Response observation is off until .docs()/createDocs() turns it on, so apps
   // that never generate docs pay zero interceptor cost. "redacted" infers a
   // JSON Schema and keeps no real values; "live" also keeps one real example.
@@ -1324,9 +1507,9 @@ export class TypedRouter<
    */
   useMiddleware<
     TReq extends Record<string, any> = {},
-    TLocals extends Record<string, any> = {}
+    TLocals extends Record<string, any> = {},
   >(
-    middleware: TypedMiddleware<TReq, TLocals>
+    middleware: TypedMiddleware<TReq, TLocals>,
   ): TypedRouter<Req & TReq, Locals & TLocals> {
     this.router.use(middleware as any);
     return this as any;
@@ -1358,20 +1541,36 @@ export class TypedRouter<
    */
   use(
     path: string,
-    ...handlers: Array<express.RequestHandler | express.Router | TypedRouter<any, any>>
+    ...handlers: Array<
+      express.RequestHandler | express.Router | TypedRouter<any, any>
+    >
   ): TypedRouter<Req, Locals>;
   use(
-    ...handlers: Array<express.RequestHandler | express.Router | TypedRouter<any, any>>
+    ...handlers: Array<
+      express.RequestHandler | express.Router | TypedRouter<any, any>
+    >
   ): TypedRouter<Req, Locals>;
   use(
-    pathOrHandler: string | express.RequestHandler | express.Router | TypedRouter<any, any>,
-    ...rest: Array<express.RequestHandler | express.Router | TypedRouter<any, any>>
+    pathOrHandler:
+      | string
+      | express.RequestHandler
+      | express.Router
+      | TypedRouter<any, any>,
+    ...rest: Array<
+      express.RequestHandler | express.Router | TypedRouter<any, any>
+    >
   ): TypedRouter<Req, Locals> {
     const isPath = typeof pathOrHandler === "string";
     const prefix = isPath ? (pathOrHandler as string) : "";
     const rawHandlers = isPath
       ? rest
-      : [pathOrHandler as express.RequestHandler | express.Router | TypedRouter<any, any>, ...rest];
+      : [
+          pathOrHandler as
+            | express.RequestHandler
+            | express.Router
+            | TypedRouter<any, any>,
+          ...rest,
+        ];
 
     // Resolve TypedRouter instances to their underlying Express routers,
     // tracking them for .docs() along the way.
@@ -1411,14 +1610,12 @@ export class TypedRouter<
    */
   mount(
     prefix: string,
-    router: TypedRouter<any, any>
+    router: TypedRouter<any, any>,
   ): TypedRouter<Req, Locals>;
-  mount(
-    router: TypedRouter<any, any>
-  ): TypedRouter<Req, Locals>;
+  mount(router: TypedRouter<any, any>): TypedRouter<Req, Locals>;
   mount(
     prefixOrRouter: string | TypedRouter<any, any>,
-    maybeRouter?: TypedRouter<any, any>
+    maybeRouter?: TypedRouter<any, any>,
   ): TypedRouter<Req, Locals> {
     if (typeof prefixOrRouter === "string") {
       const sub = maybeRouter!;
@@ -1444,7 +1641,7 @@ export class TypedRouter<
         ...(typeof meta.path === "string"
           ? { path: prefix + meta.path }
           : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
-      }))
+      })),
     );
     return [...this.routes, ...mounted];
   }
@@ -1458,7 +1655,7 @@ export class TypedRouter<
   enableSampling(
     mode: "redacted" | "live" = "redacted",
     writer?: () => void,
-    visited = new Set<TypedRouter<any, any>>()
+    visited = new Set<TypedRouter<any, any>>(),
   ): void {
     if (visited.has(this)) return;
     visited.add(this);
@@ -1474,7 +1671,11 @@ export class TypedRouter<
    * pairs and propagating the sample mode if docs were already requested.
    */
   private trackMounted(prefix: string, router: TypedRouter<any, any>): void {
-    if (this.mountedRouters.some((m) => m.router === router && m.prefix === prefix)) {
+    if (
+      this.mountedRouters.some(
+        (m) => m.router === router && m.prefix === prefix,
+      )
+    ) {
       return;
     }
     this.mountedRouters.push({ prefix, router });
@@ -1492,27 +1693,29 @@ export class TypedRouter<
   hydrateResponses(
     spec: any,
     prefix = "",
-    visited = new Set<TypedRouter<any, any>>()
+    visited = new Set<TypedRouter<any, any>>(),
   ): void {
     if (visited.has(this)) return;
     visited.add(this);
     const paths = spec?.paths ?? {};
     for (const route of this.routes) {
-      const key = expressPathToOpenApi(prefix + resolveDocPath(route));
-      const op = paths[key]?.[route.method];
-      const responses = op?.responses;
-      if (!responses) continue;
-      for (const status of Object.keys(responses)) {
-        const code = Number(status);
-        if (Number.isNaN(code) || route.responseSamples.has(code)) continue;
-        const json = responses[status]?.content?.["application/json"];
-        if (!json?.schema) continue;
-        route.responseSamples.set(
-          code,
-          json.example !== undefined
-            ? { schema: json.schema, example: json.example }
-            : { schema: json.schema }
-        );
+      for (const docPath of resolveDocPaths(route)) {
+        const key = expressPathToOpenApi(prefix + docPath);
+        const op = paths[key]?.[route.method];
+        const responses = op?.responses;
+        if (!responses) continue;
+        for (const status of Object.keys(responses)) {
+          const code = Number(status);
+          if (Number.isNaN(code) || route.responseSamples.has(code)) continue;
+          const json = responses[status]?.content?.["application/json"];
+          if (!json?.schema) continue;
+          route.responseSamples.set(
+            code,
+            json.example !== undefined
+              ? { schema: json.schema, example: json.example }
+              : { schema: json.schema },
+          );
+        }
       }
     }
     for (const { prefix: p, router } of this.mountedRouters) {
@@ -1599,7 +1802,7 @@ export class TypedRouter<
     if (options.sampleResponses !== false) {
       this.enableSampling(
         options.sampleResponses === "live" ? "live" : "redacted",
-        scheduleWrite
+        scheduleWrite,
       );
     }
 
@@ -1629,13 +1832,7 @@ export class TypedRouter<
   // Method overloads for GET requests with automatic middleware type inference
   get<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<
-      Path,
-      undefined,
-      undefined,
-      Req,
-      Locals
-    >
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
 
   // Body/query schema and middleware live as flat sibling properties (not
@@ -1646,7 +1843,7 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -1662,19 +1859,19 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
   // params always type as Record<string, string>.
   get(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   get<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -1690,26 +1887,26 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   // Implementation
   get(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
   } // Combined overload for body/query schema + middleware (most specific first)
   post<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   post<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -1725,17 +1922,17 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   post(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   post<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -1751,12 +1948,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   post(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("post", path, optionsOrHandler, handler);
   }
@@ -1764,14 +1961,14 @@ export class TypedRouter<
   // PUT method: same overload shape as POST
   put<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   put<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -1787,17 +1984,17 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   put(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   put<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -1813,12 +2010,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   put(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("put", path, optionsOrHandler, handler);
   }
@@ -1826,14 +2023,14 @@ export class TypedRouter<
   // PATCH method: same overload shape as POST
   patch<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   patch<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -1849,17 +2046,17 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   patch(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   patch<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -1875,12 +2072,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   patch(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("patch", path, optionsOrHandler, handler);
   }
@@ -1888,13 +2085,13 @@ export class TypedRouter<
   // DELETE method: no bodySchema (typically no body)
   delete<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   delete<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -1909,16 +2106,16 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   delete(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   delete<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -1933,12 +2130,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   delete(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("delete", path, optionsOrHandler, handler);
   }
@@ -1946,13 +2143,13 @@ export class TypedRouter<
   // OPTIONS method: no bodySchema (typically used for CORS preflight)
   options<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   options<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -1967,16 +2164,16 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   options(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   options<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -1991,12 +2188,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   options(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("options", path, optionsOrHandler, handler);
   }
@@ -2004,13 +2201,13 @@ export class TypedRouter<
   // HEAD method: no bodySchema (like GET but only returns headers)
   head<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   head<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -2025,16 +2222,16 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   head(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   head<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -2049,12 +2246,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   head(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("head", path, optionsOrHandler, handler);
   }
@@ -2062,14 +2259,14 @@ export class TypedRouter<
   // ALL method: same overload shape as POST (matches every HTTP method)
   all<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   all<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
@@ -2085,17 +2282,17 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   all(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
   ): TypedRouter<Req, Locals>;
   all<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
-    M extends TypedMiddleware<any, any>[] = []
+    M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
@@ -2111,12 +2308,12 @@ export class TypedRouter<
       Req & InferMiddlewareProps<readonly [...M]>,
       Locals & InferMiddlewareLocals<readonly [...M]>,
       ParamsSchema
-    >
+    >,
   ): TypedRouter<Req, Locals>;
   all(
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     return this.registerRoute("all", path, optionsOrHandler, handler);
   }
@@ -2125,7 +2322,7 @@ export class TypedRouter<
     method: HttpMethod,
     path: string | RegExp,
     optionsOrHandler: any,
-    handler?: any
+    handler?: any,
   ): TypedRouter<Req, Locals> {
     const middlewares: any[] = [];
     const meta: RouteMetadata = { method, path, responseSamples: new Map() };
@@ -2150,17 +2347,17 @@ export class TypedRouter<
       }
       if (options.bodySchema) {
         middlewares.push(
-          this.createBodyValidationMiddleware(options.bodySchema)
+          this.createBodyValidationMiddleware(options.bodySchema),
         );
       }
       if (options.querySchema) {
         middlewares.push(
-          this.createQueryValidationMiddleware(options.querySchema)
+          this.createQueryValidationMiddleware(options.querySchema),
         );
       }
       if (options.paramsSchema) {
         middlewares.push(
-          this.createParamsValidationMiddleware(options.paramsSchema)
+          this.createParamsValidationMiddleware(options.paramsSchema),
         );
       }
       middlewares.push(handler);
@@ -2187,10 +2384,12 @@ export class TypedRouter<
       const schema = inferJsonSchema(body);
       const existing = meta.responseSamples.get(status);
       // Merge each observation so optional/nullable fields surface over time.
-      const merged = existing ? mergeJsonSchema(existing.schema, schema) : schema;
+      const merged = existing
+        ? mergeJsonSchema(existing.schema, schema)
+        : schema;
       // Keep one real example only in "live" mode; redacted keeps no values.
       const example =
-        this.sampleMode === "live" ? existing?.example ?? body : undefined;
+        this.sampleMode === "live" ? (existing?.example ?? body) : undefined;
       // Only rewrite the spec file when the inferred shape actually changed —
       // so the debounced writer goes quiet once schemas stabilize.
       const changed =
@@ -2198,11 +2397,7 @@ export class TypedRouter<
       meta.responseSamples.set(status, { schema: merged, example });
       if (changed) this.scheduleSpecWrite?.();
     };
-    const interceptor = (
-      _req: Request,
-      res: Response,
-      next: NextFunction
-    ) => {
+    const interceptor = (_req: Request, res: Response, next: NextFunction) => {
       if (
         this.sampleMode === "off" ||
         meta.hidden ||
@@ -2224,7 +2419,11 @@ export class TypedRouter<
       res.send = function (body: any) {
         // Only sample JSON-like object bodies; skip strings, Buffers, null.
         // (When send delegates to our wrapped json, json already captured it.)
-        if (body !== null && typeof body === "object" && !Buffer.isBuffer(body)) {
+        if (
+          body !== null &&
+          typeof body === "object" &&
+          !Buffer.isBuffer(body)
+        ) {
           capture(res, body);
         }
         return originalSend.call(this, body);
@@ -2233,7 +2432,11 @@ export class TypedRouter<
       next();
     };
 
-    (this.router as any)[method](toExpressPath(path), interceptor, ...middlewares);
+    (this.router as any)[method](
+      toExpressPath(path),
+      interceptor,
+      ...middlewares,
+    );
 
     return this;
   }
@@ -2284,7 +2487,8 @@ export class TypedRouter<
         }
         // Unlike req.query, req.params is a plain writable own property in
         // Express 5 — no Object.defineProperty workaround needed here.
-        req.params = resolved && "value" in resolved ? resolved.value : resolved;
+        req.params =
+          resolved && "value" in resolved ? resolved.value : resolved;
         next();
       } catch (error) {
         if (isSchemaError(error)) {
@@ -2359,7 +2563,7 @@ export class TypedRouter<
  */
 export function createTypedRouter<
   Req extends Record<string, any> = AdditionalReqProps,
-  Locals extends Record<string, any> = AdditionalLocals
+  Locals extends Record<string, any> = AdditionalLocals,
 >(): TypedRouter<Req, Locals> {
   return new TypedRouter<Req, Locals>();
 }
@@ -2378,7 +2582,7 @@ export interface RouterConfig {
     error: any,
     req: Request,
     res: Response,
-    next: NextFunction
+    next: NextFunction,
   ) => void;
 }
 
@@ -2401,7 +2605,7 @@ export interface RouterConfig {
  */
 export function createTypedRouterWithConfig<
   Req extends Record<string, any> = AdditionalReqProps,
-  Locals extends Record<string, any> = AdditionalLocals
+  Locals extends Record<string, any> = AdditionalLocals,
 >(config?: RouterConfig): TypedRouter<Req, Locals> {
   const router = new TypedRouter<Req, Locals>();
   if (config?.errorHandler) {
@@ -2474,13 +2678,13 @@ export type RouterDocEntry =
  */
 export function createDocs(
   routers: RouterDocEntry | RouterDocEntry[],
-  options: DocsOptions = {}
+  options: DocsOptions = {},
 ): express.Router & express.RequestHandler {
   const entries = (Array.isArray(routers) ? routers : [routers]).map(
     (entry): { prefix: string; router: TypedRouter<any, any> } =>
       "prefix" in entry
         ? (entry as { prefix: string; router: TypedRouter<any, any> })
-        : { prefix: "", router: entry as TypedRouter<any, any> }
+        : { prefix: "", router: entry as TypedRouter<any, any> },
   );
 
   // Observe responses to infer schemas, unless opted out (privacy).
@@ -2493,13 +2697,17 @@ export function createDocs(
 
   docsRouter.get("/openapi.json", async (_req, res) => {
     try {
-      const mergedRoutes: RouteMetadata[] = entries.flatMap(({ prefix, router }) =>
-        router.getRouteMetadata().map((meta) => ({
-          ...meta,
-          ...(typeof meta.path === "string"
-            ? { path: prefix + meta.path }
-            : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
-        }))
+      const mergedRoutes: RouteMetadata[] = entries.flatMap(
+        ({ prefix, router }) =>
+          router.getRouteMetadata().map((meta) => ({
+            ...meta,
+            ...(typeof meta.path === "string"
+              ? { path: prefix + meta.path }
+              : {
+                  path: meta.path,
+                  pathExample: prefix + resolveDocPath(meta),
+                }),
+          })),
       );
       const spec = await buildOpenApiSpec(mergedRoutes, options);
       res.json(spec);

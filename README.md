@@ -173,6 +173,44 @@ router.get("/admin", { middleware: [requireAdmin] }, (req, res) => {
 
 > **Note:** `useMiddleware` returns a new router instance. Use method chaining or capture the return value — see [Common Patterns](#common-patterns).
 
+### Reusable route handlers
+
+Use `InferSchemaHandler` when the same typed handler is registered for multiple
+routes. Pass the same route options as the route; middleware can be supplied as
+one middleware type or as a tuple.
+
+```ts
+import {
+  InferSchemaHandler,
+  type TypedMiddleware,
+} from "@minisylar/express-typed-router";
+
+const auth: TypedMiddleware<{ userId: string }> = (req, _res, next) => {
+  req.userId = "user-123";
+  next();
+};
+
+type WebhookHandler = InferSchemaHandler<{
+  bodySchema: typeof WebhookSchema;
+  middleware: typeof auth;
+}>;
+
+const consolidatedHandler: WebhookHandler = (req, res) => {
+  res.json({ receivedBy: req.userId, event: req.body });
+};
+
+router.post(
+  "/webhooks/events/*path",
+  { bodySchema: WebhookSchema, middleware: [auth] },
+  consolidatedHandler,
+);
+router.post(
+  "/hooks/event",
+  { bodySchema: WebhookSchema, middleware: [auth] },
+  consolidatedHandler,
+);
+```
+
 ---
 
 ## ✨ OpenAPI and docs
@@ -227,6 +265,21 @@ app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 // Discovers all sub-routers and merges routes with correct prefixes
 ```
 
+**Regex route docs** — simple top-level alternatives are expanded into
+separate OpenAPI paths automatically:
+
+```ts
+router.post(
+  /(\/webhooks\/events.*)|(\/hooks\/event\/?$)/,
+  { bodySchema: WebhookSchema, middleware: [auth] },
+  consolidatedHandler,
+);
+```
+
+This produces `/webhooks/events/{path}` and `/hooks/event` in the spec.
+For complex regular expressions, provide `pathExample` as a documentation
+stand-in; runtime matching is unaffected.
+
 ### Response schemas from live traffic
 
 You don't have to declare what your routes return. The library **observes real responses** (`res.json` / `res.send`), **infers a JSON Schema** from them, and **merges across samples** — so it learns field types, which fields are nullable, and which are optional. This drives both the docs UI and `openapi-typescript` (real response types instead of `unknown`).
@@ -249,21 +302,27 @@ By default this runs in **redacted** mode: only the shape is kept, never the val
 
 Control it with `sampleResponses`:
 
-| Value | Behavior |
-|---|---|
-| `true` _(default)_ | **Redacted** — infer schema only. Real values discarded at capture time. Safe to expose. |
-| `"live"` | Infer schema **and** attach one real captured response as an example. ⚠️ Examples contain actual data — use only for trusted/internal docs. |
-| `false` | Don't observe responses at all. |
+| Value              | Behavior                                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `true` _(default)_ | **Redacted** — infer schema only. Real values discarded at capture time. Safe to expose.                                                    |
+| `"live"`           | Infer schema **and** attach one real captured response as an example. ⚠️ Examples contain actual data — use only for trusted/internal docs. |
+| `false`            | Don't observe responses at all.                                                                                                             |
 
 ```ts
 // Safe default — schema only, no real data
 app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 
 // Show real example payloads (internal docs only)
-app.use("/docs", api.docs({ title: "My API", version: "1.0.0", sampleResponses: "live" }));
+app.use(
+  "/docs",
+  api.docs({ title: "My API", version: "1.0.0", sampleResponses: "live" }),
+);
 
 // Disable entirely
-app.use("/docs", api.docs({ title: "My API", version: "1.0.0", sampleResponses: false }));
+app.use(
+  "/docs",
+  api.docs({ title: "My API", version: "1.0.0", sampleResponses: false }),
+);
 ```
 
 > Exclude an individual sensitive route from docs with `hidden: true` in its route options — works in any mode.
@@ -352,7 +411,7 @@ Edit a route, save, and your client types update on their own.
 
 **Prefer to keep it manual?** Skip `nodemon` and `npm-run-all2` entirely — just run the server with `node --watch src/server.ts` and regenerate types on demand with `openapi-typescript ./openapi.json -o ./api.d.ts` whenever you change your API.
 
-> ⚠️ **Avoid a restart loop.** Write the generated `api.d.ts` **outside** the path your server watcher restarts on (or add it to the watcher's ignore list). If your server watches `*.ts` in `src/` and you output the types *into* `src/`, you get: type-gen writes `api.d.ts` → server restarts → spec rewrites → type-gen runs again → ♻️. Putting it in a separate folder (e.g. `shared/`, `generated/`) avoids this.
+> ⚠️ **Avoid a restart loop.** Write the generated `api.d.ts` **outside** the path your server watcher restarts on (or add it to the watcher's ignore list). If your server watches `*.ts` in `src/` and you output the types _into_ `src/`, you get: type-gen writes `api.d.ts` → server restarts → spec rewrites → type-gen runs again → ♻️. Putting it in a separate folder (e.g. `shared/`, `generated/`) avoids this.
 
 ### Use with `openapi-fetch`
 
@@ -497,7 +556,7 @@ app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 
 ### `querySchema` booleans: `req.query.flag` is text, not a real boolean
 
-Query strings have no wire format for booleans — `?flag=false` arrives at your schema as the *string* `"false"`, no matter what the client intended. This isn't specific to this library; it's true of every Express app, but it trips people up specifically when picking a schema for `querySchema`:
+Query strings have no wire format for booleans — `?flag=false` arrives at your schema as the _string_ `"false"`, no matter what the client intended. This isn't specific to this library; it's true of every Express app, but it trips people up specifically when picking a schema for `querySchema`:
 
 ```ts
 router.get(
@@ -512,7 +571,9 @@ router.get(
 The obvious fix has its own trap:
 
 ```ts
-{ querySchema: z.object({ flag: z.coerce.boolean() }) } // ❌ silently wrong
+{
+  querySchema: z.object({ flag: z.coerce.boolean() });
+} // ❌ silently wrong
 ```
 
 `z.coerce.boolean()` does plain JS `Boolean(value)` — and `Boolean("false")` is `true`, because any non-empty string is truthy in JavaScript. `?flag=false` stops erroring and instead silently becomes `true`.
@@ -520,7 +581,9 @@ The obvious fix has its own trap:
 Use a schema that actually parses the text:
 
 ```ts
-{ querySchema: z.object({ flag: z.stringbool() }) } // ✅ zod v4+
+{
+  querySchema: z.object({ flag: z.stringbool() });
+} // ✅ zod v4+
 ```
 
 `z.stringbool()` parses `"true"`/`"false"` (and a few common variants) into the correct boolean. This isn't an express-typed-router limitation to work around — the router runs whatever schema you give it exactly as written; the fix is picking the right schema primitive, not something the router could safely guess on your behalf.
