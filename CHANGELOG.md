@@ -1,3 +1,10 @@
+## [1.9.6](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.5...v1.9.6) (2026-08-25)
+
+### Bug Fixes
+
+* **router:** expand regex alternatives in OpenAPI docs ([fd11d99](https://github.com/Mini-Sylar/express-typed-router/commit/fd11d991cb5a53244924ab7723ae00216f04c129))
+* **types:** improve reusable handlers and regex docs ([a1824fd](https://github.com/Mini-Sylar/express-typed-router/commit/a1824fdd97975702766c89c1af853c34edff4ce4))
+
 ## [1.9.5](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.4...v1.9.5) (2026-08-24)
 
 ### Bug Fixes
