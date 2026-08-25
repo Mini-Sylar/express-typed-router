@@ -190,23 +190,23 @@ const auth: TypedMiddleware<{ userId: string }> = (req, _res, next) => {
   next();
 };
 
-type ListenHandler = InferSchemaHandler<{
-  bodySchema: typeof ListenSchema;
+type WebhookHandler = InferSchemaHandler<{
+  bodySchema: typeof WebhookSchema;
   middleware: typeof auth;
 }>;
 
-const consolidatedHandler: ListenHandler = (req, res) => {
-  res.json({ userId: req.userId, data: req.body });
+const consolidatedHandler: WebhookHandler = (req, res) => {
+  res.json({ receivedBy: req.userId, event: req.body });
 };
 
 router.post(
-  "/api/listenbrainz/*path",
-  { bodySchema: ListenSchema, middleware: [auth] },
+  "/webhooks/events/*path",
+  { bodySchema: WebhookSchema, middleware: [auth] },
   consolidatedHandler,
 );
 router.post(
-  "/1/submit-listens",
-  { bodySchema: ListenSchema, middleware: [auth] },
+  "/hooks/event",
+  { bodySchema: WebhookSchema, middleware: [auth] },
   consolidatedHandler,
 );
 ```
@@ -264,6 +264,21 @@ const api = createTypedRouter()
 app.use("/docs", api.docs({ title: "My API", version: "1.0.0" }));
 // Discovers all sub-routers and merges routes with correct prefixes
 ```
+
+**Regex route docs** — simple top-level alternatives are expanded into
+separate OpenAPI paths automatically:
+
+```ts
+router.post(
+  /(\/webhooks\/events.*)|(\/hooks\/event\/?$)/,
+  { bodySchema: WebhookSchema, middleware: [auth] },
+  consolidatedHandler,
+);
+```
+
+This produces `/webhooks/events/{path}` and `/hooks/event` in the spec.
+For complex regular expressions, provide `pathExample` as a documentation
+stand-in; runtime matching is unaffected.
 
 ### Response schemas from live traffic
 

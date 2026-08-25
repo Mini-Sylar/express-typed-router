@@ -958,6 +958,105 @@ function resolveDocPath(route: {
     .replace(/\((?!\?)[^()]*\)/g, () => `:${index++}`);
 }
 
+// Split only on alternation operators that are outside nested groups and
+// character classes. This deliberately handles the useful route-shaped regex
+// subset without pretending to be a general-purpose regular-expression parser.
+function splitRegexAlternatives(source: string): string[] {
+  const alternatives: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") {
+      inClass = true;
+      continue;
+    }
+    if (char === "]") {
+      inClass = false;
+      continue;
+    }
+    if (inClass) continue;
+    if (char === "(") depth++;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if (char === "|" && depth === 0) {
+      alternatives.push(source.slice(start, i));
+      start = i + 1;
+    }
+  }
+
+  alternatives.push(source.slice(start));
+  return alternatives.length > 1 ? alternatives : [source];
+}
+
+function unwrapRegexGroup(source: string): string {
+  if (!source.startsWith("(") || !source.endsWith(")")) return source;
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") inClass = true;
+    else if (char === "]") inClass = false;
+    else if (!inClass && char === "(") depth++;
+    else if (!inClass && char === ")") {
+      depth--;
+      if (depth === 0 && i !== source.length - 1) return source;
+    }
+  }
+  return source.slice(1, -1).replace(/^\?:/, "");
+}
+
+function regexAlternativeToDocPath(source: string): string {
+  let index = 0;
+  return (
+    unwrapRegexGroup(source)
+      .replace(/^\^|\$$/g, "")
+      // A route regex commonly escapes slashes because it is written as a
+      // literal. They are ordinary path separators in OpenAPI.
+      .replace(/\\\//g, "/")
+      // An arbitrary suffix is represented by one readable path parameter.
+      .replace(/\.\*|\.\+/g, "/:path")
+      // A trailing slash marker does not need a separate OpenAPI path.
+      .replace(/\/?\?$/, "")
+      // Preserve named captures and give unnamed captures stable positional
+      // names, matching Express's req.params convention.
+      .replace(/\(\?<([A-Za-z0-9_]+)>[^()]*\)/g, ":$1")
+      .replace(/\((?!\?)[^()]*\)/g, () => `:${index++}`)
+  );
+}
+
+function resolveDocPaths(route: {
+  path: string | RegExp;
+  pathExample?: string | undefined;
+}): string[] {
+  if (typeof route.path === "string" || route.pathExample) {
+    return [resolveDocPath(route)];
+  }
+
+  const alternatives = splitRegexAlternatives(route.path.source);
+  if (alternatives.length === 1) return [resolveDocPath(route)];
+  return alternatives.map(regexAlternativeToDocPath);
+}
+
 function expressPathToOpenApi(path: string): string {
   return (
     path
@@ -1236,95 +1335,96 @@ async function buildOpenApiSpec(
   for (const route of routes) {
     if (route.method === "all" || route.hidden) continue;
 
-    const docPath = resolveDocPath(route);
-    const openApiPath = expressPathToOpenApi(docPath);
-    if (!paths[openApiPath]) paths[openApiPath] = {};
+    for (const docPath of resolveDocPaths(route)) {
+      const openApiPath = expressPathToOpenApi(docPath);
+      if (!paths[openApiPath]) paths[openApiPath] = {};
 
-    let parameters: any[];
-    if (route.paramsSchema) {
-      const ps = await trySchemaToJsonSchema(route.paramsSchema);
-      const props: Record<string, any> = ps.properties ?? {};
-      const required: string[] = ps.required ?? [];
-      parameters = Object.entries(props).map(([name, propSchema]) => ({
-        name,
-        in: "path",
-        required: required.includes(name),
-        schema: propSchema,
-      }));
-    } else {
-      parameters = extractPathParamNames(docPath).map((name) => ({
-        name,
-        in: "path",
-        required: true,
-        schema: { type: "string" },
-      }));
-    }
-
-    if (route.querySchema) {
-      const qs = await trySchemaToJsonSchema(route.querySchema);
-      const props: Record<string, any> = qs.properties ?? {};
-      const required: string[] = qs.required ?? [];
-      for (const [name, propSchema] of Object.entries(props)) {
-        parameters.push({
+      let parameters: any[];
+      if (route.paramsSchema) {
+        const ps = await trySchemaToJsonSchema(route.paramsSchema);
+        const props: Record<string, any> = ps.properties ?? {};
+        const required: string[] = ps.required ?? [];
+        parameters = Object.entries(props).map(([name, propSchema]) => ({
           name,
-          in: "query",
+          in: "path",
           required: required.includes(name),
           schema: propSchema,
-        });
+        }));
+      } else {
+        parameters = extractPathParamNames(docPath).map((name) => ({
+          name,
+          in: "path",
+          required: true,
+          schema: { type: "string" },
+        }));
       }
-    }
 
-    const operation: Record<string, any> = {
-      summary: route.summary ?? autoSummary(route.method, docPath),
-      tags: route.tags ?? [autoTag(docPath)],
-      parameters,
-    };
-
-    if (route.description) operation.description = route.description;
-    if (route.deprecated) operation.deprecated = true;
-
-    if (route.bodySchema) {
-      const bs = await trySchemaToJsonSchema(route.bodySchema);
-      operation.requestBody = {
-        required: true,
-        content: { "application/json": { schema: bs } },
-      };
-    }
-
-    const responses: Record<string, any> = {};
-    // Inferred-from-traffic schemas (best-effort, may be stale).
-    for (const [status, sample] of route.responseSamples) {
-      const json: Record<string, any> = { schema: sample.schema };
-      if (sample.example !== undefined) json.example = sample.example;
-      responses[String(status)] = {
-        description: status < 400 ? "Success" : "Error",
-        content: { "application/json": json },
-      };
-    }
-    // A declared responseSchema is the source of truth — it wins over inference
-    // for the success response (no staleness, reflects current code exactly).
-    if (route.responseSchema) {
-      const declared = await trySchemaToJsonSchema(route.responseSchema);
-      if (declared && Object.keys(declared).length) {
-        let successStatus = "200";
-        for (const code of route.responseSamples.keys()) {
-          if (code >= 200 && code < 300) {
-            successStatus = String(code);
-            break;
-          }
+      if (route.querySchema) {
+        const qs = await trySchemaToJsonSchema(route.querySchema);
+        const props: Record<string, any> = qs.properties ?? {};
+        const required: string[] = qs.required ?? [];
+        for (const [name, propSchema] of Object.entries(props)) {
+          parameters.push({
+            name,
+            in: "query",
+            required: required.includes(name),
+            schema: propSchema,
+          });
         }
-        responses[successStatus] = {
-          description: "Success",
-          content: { "application/json": { schema: declared } },
+      }
+
+      const operation: Record<string, any> = {
+        summary: route.summary ?? autoSummary(route.method, docPath),
+        tags: route.tags ?? [autoTag(docPath)],
+        parameters,
+      };
+
+      if (route.description) operation.description = route.description;
+      if (route.deprecated) operation.deprecated = true;
+
+      if (route.bodySchema) {
+        const bs = await trySchemaToJsonSchema(route.bodySchema);
+        operation.requestBody = {
+          required: true,
+          content: { "application/json": { schema: bs } },
         };
       }
-    }
-    if (Object.keys(responses).length === 0) {
-      responses["200"] = { description: "Success" };
-    }
-    operation.responses = responses;
 
-    paths[openApiPath][route.method] = operation;
+      const responses: Record<string, any> = {};
+      // Inferred-from-traffic schemas (best-effort, may be stale).
+      for (const [status, sample] of route.responseSamples) {
+        const json: Record<string, any> = { schema: sample.schema };
+        if (sample.example !== undefined) json.example = sample.example;
+        responses[String(status)] = {
+          description: status < 400 ? "Success" : "Error",
+          content: { "application/json": json },
+        };
+      }
+      // A declared responseSchema is the source of truth — it wins over inference
+      // for the success response (no staleness, reflects current code exactly).
+      if (route.responseSchema) {
+        const declared = await trySchemaToJsonSchema(route.responseSchema);
+        if (declared && Object.keys(declared).length) {
+          let successStatus = "200";
+          for (const code of route.responseSamples.keys()) {
+            if (code >= 200 && code < 300) {
+              successStatus = String(code);
+              break;
+            }
+          }
+          responses[successStatus] = {
+            description: "Success",
+            content: { "application/json": { schema: declared } },
+          };
+        }
+      }
+      if (Object.keys(responses).length === 0) {
+        responses["200"] = { description: "Success" };
+      }
+      operation.responses = responses;
+
+      paths[openApiPath][route.method] = operation;
+    }
   }
 
   return {
@@ -1599,21 +1699,23 @@ export class TypedRouter<
     visited.add(this);
     const paths = spec?.paths ?? {};
     for (const route of this.routes) {
-      const key = expressPathToOpenApi(prefix + resolveDocPath(route));
-      const op = paths[key]?.[route.method];
-      const responses = op?.responses;
-      if (!responses) continue;
-      for (const status of Object.keys(responses)) {
-        const code = Number(status);
-        if (Number.isNaN(code) || route.responseSamples.has(code)) continue;
-        const json = responses[status]?.content?.["application/json"];
-        if (!json?.schema) continue;
-        route.responseSamples.set(
-          code,
-          json.example !== undefined
-            ? { schema: json.schema, example: json.example }
-            : { schema: json.schema },
-        );
+      for (const docPath of resolveDocPaths(route)) {
+        const key = expressPathToOpenApi(prefix + docPath);
+        const op = paths[key]?.[route.method];
+        const responses = op?.responses;
+        if (!responses) continue;
+        for (const status of Object.keys(responses)) {
+          const code = Number(status);
+          if (Number.isNaN(code) || route.responseSamples.has(code)) continue;
+          const json = responses[status]?.content?.["application/json"];
+          if (!json?.schema) continue;
+          route.responseSamples.set(
+            code,
+            json.example !== undefined
+              ? { schema: json.schema, example: json.example }
+              : { schema: json.schema },
+          );
+        }
       }
     }
     for (const { prefix: p, router } of this.mountedRouters) {
