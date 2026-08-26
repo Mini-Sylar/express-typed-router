@@ -2709,40 +2709,61 @@ export type RouterDocEntry =
  *   { title: 'My API', version: '1.0.0' }
  * ));
  */
-export function createDocs(
+function mergeRouterMetadata(
   routers: RouterDocEntry | RouterDocEntry[],
-  options: DocsOptions = {},
-): express.Router & express.RequestHandler {
+): RouteMetadata[] {
   const entries = (Array.isArray(routers) ? routers : [routers]).map(
     (entry): { prefix: string; router: TypedRouter<any, any> } =>
       "prefix" in entry
         ? (entry as { prefix: string; router: TypedRouter<any, any> })
         : { prefix: "", router: entry as TypedRouter<any, any> },
   );
+  return entries.flatMap(({ prefix, router }) =>
+    router.getRouteMetadata().map((meta) => ({
+      ...meta,
+      ...(typeof meta.path === "string"
+        ? { path: prefix + meta.path }
+        : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
+    })),
+  );
+}
 
+/**
+ * Build the OpenAPI spec object directly, without mounting an Express router
+ * or making an HTTP request. For generating openapi.json at build/CI time,
+ * separately from running the app. Accepts the same router(s) shape as
+ * createDocs.
+ *
+ * @example
+ * const spec = await generateOpenApiSpec(router, { title: 'My API' });
+ * await fs.writeFile('./openapi.json', JSON.stringify(spec, null, 2));
+ */
+export async function generateOpenApiSpec(
+  routers: RouterDocEntry | RouterDocEntry[],
+  options: DocsOptions = {},
+): Promise<Record<string, any>> {
+  return buildOpenApiSpec(mergeRouterMetadata(routers), options);
+}
+
+export function createDocs(
+  routers: RouterDocEntry | RouterDocEntry[],
+  options: DocsOptions = {},
+): express.Router & express.RequestHandler {
   // Observe responses to infer schemas, unless opted out (privacy).
   if (options.sampleResponses !== false) {
     const mode = options.sampleResponses === "live" ? "live" : "redacted";
-    for (const { router } of entries) router.enableSampling(mode);
+    const entries = Array.isArray(routers) ? routers : [routers];
+    for (const entry of entries) {
+      const router = "prefix" in entry ? entry.router : entry;
+      router.enableSampling(mode);
+    }
   }
 
   const docsRouter = express.Router();
 
   docsRouter.get("/openapi.json", async (_req, res) => {
     try {
-      const mergedRoutes: RouteMetadata[] = entries.flatMap(
-        ({ prefix, router }) =>
-          router.getRouteMetadata().map((meta) => ({
-            ...meta,
-            ...(typeof meta.path === "string"
-              ? { path: prefix + meta.path }
-              : {
-                  path: meta.path,
-                  pathExample: prefix + resolveDocPath(meta),
-                }),
-          })),
-      );
-      const spec = await buildOpenApiSpec(mergedRoutes, options);
+      const spec = await generateOpenApiSpec(routers, options);
       res.json(spec);
     } catch (err) {
       res

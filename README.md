@@ -438,6 +438,46 @@ Edit a route, save, and your client types update on their own.
 
 > ⚠️ **Avoid a restart loop.** Write the generated `api.d.ts` **outside** the path your server watcher restarts on (or add it to the watcher's ignore list). If your server watches `*.ts` in `src/` and you output the types _into_ `src/`, you get: type-gen writes `api.d.ts` → server restarts → spec rewrites → type-gen runs again → ♻️. Putting it in a separate folder (e.g. `shared/`, `generated/`) avoids this.
 
+### Generate the spec without running a server
+
+`specOutputPath` above writes the file as a side effect of starting your app. That's fine for local dev, but in CI you don't want to start a server just to get a file. `generateOpenApiSpec` builds the spec object directly: no Express app, no `app.listen()`, no HTTP request.
+
+```ts
+import { createTypedRouter, generateOpenApiSpec } from "@minisylar/express-typed-router";
+import { writeFile } from "node:fs/promises";
+
+const router = createTypedRouter();
+router.get("/users/:id", handler);
+// ... define the rest of your routes
+
+const spec = await generateOpenApiSpec(router, { title: "My API", version: "1.0.0" });
+await writeFile("./openapi.json", JSON.stringify(spec, null, 2));
+```
+
+Run that as a script in CI and feed the output to whatever reads a static spec: `openapi-typescript`, a docs site generator, a linter, anything that takes a `.json` file.
+
+It accepts the same router shapes as [`createDocs`](#per-feature-routers-one-doc-endpoint) — a single router, a single prefixed router, or an array mixing either:
+
+```ts
+// Single router, no options
+await generateOpenApiSpec(usersRouter);
+
+// Single router with a prefix
+await generateOpenApiSpec({ prefix: "/api/users", router: usersRouter });
+
+// Multiple routers, all prefixed
+await generateOpenApiSpec([
+  { prefix: "/api/users", router: usersRouter },
+  { prefix: "/api/orders", router: ordersRouter },
+]);
+
+// Mixed — some prefixed, some not
+await generateOpenApiSpec([
+  usersRouter,
+  { prefix: "/api/orders", router: ordersRouter },
+]);
+```
+
 ### Use with `openapi-fetch`
 
 ```ts
@@ -626,6 +666,7 @@ Use a schema that actually parses the text:
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |
+| `generateOpenApiSpec(routers, options)`  | Build the spec object with no server involved    |
 | `TypedMiddleware<T>`                     | Type helper for middleware that extends `req`    |
 
 ---
