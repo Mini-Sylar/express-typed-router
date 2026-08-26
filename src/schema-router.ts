@@ -605,6 +605,23 @@ export type RequestOnlyMiddleware<TReq extends Record<string, any>> =
 export type LocalsOnlyMiddleware<TLocals extends Record<string, any>> =
   TypedMiddleware<{}, TLocals>;
 
+/**
+ * Assigning a middleware array to a variable widens it to
+ * TypedMiddleware<any, any>[], losing the per-middleware types that
+ * InferSchemaHandler needs. The usual fix is `as const` on the array;
+ * defineMiddleware does the same thing without it, since the `const` type
+ * parameter keeps each argument's specific type instead of widening.
+ *
+ * @example
+ * const middleware = defineMiddleware(auth, logging);
+ * type Handler = InferSchemaHandler<{ middleware: typeof middleware }>;
+ */
+export function defineMiddleware<
+  const M extends readonly TypedMiddleware<any, any>[],
+>(...mw: M): [...M] {
+  return mw as [...M];
+}
+
 // Utility type to infer props from middleware array (no recursion depth limit)
 type InferMiddlewareProps<T extends readonly TypedMiddleware<any, any>[]> =
   T extends readonly [infer First, ...infer Rest]

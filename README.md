@@ -340,20 +340,20 @@ app.use(
   router.get("/something", { middleware: [a, b, c] }, handler);
   ```
 
-  If you need to reuse the middleware variable with `InferSchemaHandler`, use
-  `as const` or declare the tuple type explicitly:
+  If you need to reuse the middleware variable with `InferSchemaHandler`, wrap
+  it in `defineMiddleware`. It keeps each middleware's specific type instead
+  of widening:
+
+  ```ts
+  const middleware = defineMiddleware(a, b, c);
+  type Handler = InferSchemaHandler<{ middleware: typeof middleware }>;
+  ```
+
+  `as const` works too, if you'd rather not import a helper:
 
   ```ts
   const middleware = [a, b, c] as const;
   type Handler = InferSchemaHandler<{ middleware: typeof middleware }>;
-  ```
-
-  Or declare it directly:
-
-  ```ts
-  type Handler = InferSchemaHandler<{
-    middleware: [typeof a, typeof b, typeof c];
-  }>;
   ```
 
 - **Reset accumulated schemas** — inference is merge-only, so a field you _remove_ from a response lingers in the docs. To clear it, delete `openapi.json` and let it rebuild from current traffic.
@@ -668,6 +668,7 @@ Use a schema that actually parses the text:
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |
 | `generateOpenApiSpec(routers, options)`  | Build the spec object with no server involved    |
 | `TypedMiddleware<T>`                     | Type helper for middleware that extends `req`    |
+| `defineMiddleware(...mw)`                | Keep a middleware array's tuple type when reused |
 
 ---
 
