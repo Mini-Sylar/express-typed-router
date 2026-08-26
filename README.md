@@ -329,7 +329,7 @@ app.use(
 
 **How it persists:** schemas fill in as traffic flows. They're held in memory and, when `specOutputPath` is set, written to the file (debounced) as new shapes are observed. On startup the library **reloads** the existing file, so a restart doesn't reset what was already learned — the file is the durable store.
 
-**Gotchas:**
+### Gotchas
 
 - **Keep middleware variables as tuples** - inline middleware arrays preserve
   their tuple type automatically, but assigning the array to a variable widens
