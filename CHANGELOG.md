@@ -1,3 +1,15 @@
+## [1.9.8](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.7...v1.9.8) (2026-08-26)
+
+### Bug Fixes
+
+* add defineMiddleware to keep narrow tuple typing when reused ([#8](https://github.com/Mini-Sylar/express-typed-router/issues/8)) ([7a326bf](https://github.com/Mini-Sylar/express-typed-router/commit/7a326bf83bb2b12f83255a61eded40fecc748917))
+* add generateOpenApiSpec for build-time spec generation ([#13](https://github.com/Mini-Sylar/express-typed-router/issues/13)) ([49982ee](https://github.com/Mini-Sylar/express-typed-router/commit/49982ee47e84745918880ba596de59ae22e3db20))
+
+### Documentation
+
+* add shareable gotchas heading ([07fa2b8](https://github.com/Mini-Sylar/express-typed-router/commit/07fa2b827b124ae7faad2acf6c147504cc3aee0f))
+* document middleware tuple inference ([a1bb2cd](https://github.com/Mini-Sylar/express-typed-router/commit/a1bb2cd722507474bd4a1f97a6438441ef5f8bc7))
+
 ## [1.9.7](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.6...v1.9.7) (2026-08-25)
 
 ### Bug Fixes
