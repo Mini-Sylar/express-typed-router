@@ -331,6 +331,31 @@ app.use(
 
 **Gotchas:**
 
+- **Keep middleware variables as tuples** - inline middleware arrays preserve
+  their tuple type automatically, but assigning the array to a variable widens
+  it to `TypedMiddleware[]`. The simplest option is to pass the tuple directly
+  in the route's `middleware` object:
+
+  ```ts
+  router.get("/something", { middleware: [a, b, c] }, handler);
+  ```
+
+  If you need to reuse the middleware variable with `InferSchemaHandler`, use
+  `as const` or declare the tuple type explicitly:
+
+  ```ts
+  const middleware = [a, b, c] as const;
+  type Handler = InferSchemaHandler<{ middleware: typeof middleware }>;
+  ```
+
+  Or declare it directly:
+
+  ```ts
+  type Handler = InferSchemaHandler<{
+    middleware: [typeof a, typeof b, typeof c];
+  }>;
+  ```
+
 - **Reset accumulated schemas** — inference is merge-only, so a field you _remove_ from a response lingers in the docs. To clear it, delete `openapi.json` and let it rebuild from current traffic.
 - **`responseSchema` beats inference** — declare it on routes you want guaranteed-correct (and leak-proof); it overrides whatever traffic suggests.
 - **`res.jsonp()` isn't captured** — only `res.json` and `res.send`. JSONP responses won't get an inferred schema (declare `responseSchema` if you need one).
