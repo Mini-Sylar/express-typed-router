@@ -1092,32 +1092,51 @@ function resolveDocPaths(route: {
 }
 
 function expressPathToOpenApi(path: string): string {
-  return (
-    path
-      // Express 5 optional-segment braces: `{/:id}` / `{/seg}` → keep contents.
-      .replace(/\{([^{}]*)\}/g, "$1")
-      // `:name`, optionally with a regex constraint `(...)` and a `?`/`+`/`*`
-      // modifier → OpenAPI `{name}`.
-      .replace(/:([A-Za-z0-9_]+)(?:\([^)]*\))?[?+*]?/g, "{$1}")
-      // Named regex capture group `(?<name>...)` → OpenAPI `{name}`.
-      .replace(/\(\?<([A-Za-z0-9_]+)>[^)]*\)/g, "{$1}")
-      // Regex anchors have no meaning in an OpenAPI path.
-      .replace(/^\^|\$$/g, "")
-      // Brace removal can leave `//` (e.g. `/x{/:id}` → `/x//...`); collapse it.
-      .replace(/\/{2,}/g, "/")
-  );
+  const withNamedTokens = path
+    // Express 5 optional-segment braces: `{/:id}` / `{/seg}` → keep contents.
+    .replace(/\{([^{}]*)\}/g, "$1")
+    // `:name`, optionally with a regex constraint `(...)` and a `?`/`+`/`*`
+    // modifier → OpenAPI `{name}`.
+    .replace(/:([A-Za-z0-9_]+)(?:\([^)]*\))?[?+*]?/g, "{$1}")
+    // Named regex capture group `(?<name>...)` → OpenAPI `{name}`.
+    .replace(/\(\?<([A-Za-z0-9_]+)>[^)]*\)/g, "{$1}")
+    // Named wildcard `*name` (Express 5) → OpenAPI `{name}`.
+    .replace(/\*([A-Za-z0-9_]+)/g, "{$1}")
+    // Regex anchors have no meaning in an OpenAPI path.
+    .replace(/^\^|\$$/g, "");
+  // A bare `*` left over is an unnamed wildcard (legacy Express 4 syntax);
+  // number them positionally to match req.params["0"], ["1"], ...
+  let wildcardIndex = 0;
+  return withNamedTokens
+    .replace(/\*/g, () => `{${wildcardIndex++}}`)
+    // Brace removal can leave `//` (e.g. `/x{/:id}` → `/x//...`); collapse it.
+    .replace(/\/{2,}/g, "/");
 }
 
 function extractPathParamNames(path: string): string[] {
-  const stripped = path.replace(/\{([^{}]*)\}/g, "$1");
-  return [
+  const stripped = path
+    .replace(/\{([^{}]*)\}/g, "$1")
+    .replace(/^\^|\$$/g, "");
+  const named = [
     ...stripped.matchAll(/:([A-Za-z0-9_]+)/g),
     ...stripped.matchAll(/\(\?<([A-Za-z0-9_]+)>/g),
+    ...stripped.matchAll(/\*([A-Za-z0-9_]+)/g),
   ].map((m) => m[1]!);
+  // Bare `*` left after removing named wildcards is unnamed (legacy Express
+  // 4 syntax); number them positionally, same as expressPathToOpenApi does.
+  const unnamedCount = (
+    stripped.replace(/\*[A-Za-z0-9_]+/g, "").match(/\*/g) ?? []
+  ).length;
+  for (let i = 0; i < unnamedCount; i++) named.push(String(i));
+  return named;
 }
 
 function isParamSegment(s: string): boolean {
-  return s.startsWith(":") || s.startsWith("*") || s.includes("(?<");
+  return (
+    s.startsWith(":") ||
+    s.includes("*") ||
+    s.includes("(?<")
+  );
 }
 
 function autoTag(path: string): string {
