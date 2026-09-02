@@ -703,6 +703,102 @@ export type SchemaRouteHandler<
  * @property paramsSchema - Optional schema for validating route params.
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
+/** Which validated part of the request failed. */
+export type ValidationFailureSource = "body" | "query" | "params";
+
+/** Passed to a validation failure hook when bodySchema/querySchema/paramsSchema rejects a request. */
+export interface ValidationFailureInfo {
+  source: ValidationFailureSource;
+  error: string;
+  details: any[];
+  method: HttpMethod;
+  path: string;
+  req: Request;
+}
+
+/**
+ * Called when validation fails, in addition to the 400 response that's
+ * already sent. It's for logging or tracking, not for changing the response.
+ * May be async (e.g. to log to an external service); the response is sent
+ * without waiting for it either way. Both a synchronous throw and a rejected
+ * promise are caught and ignored, so a broken hook can't take down request
+ * handling or surface as an unhandled rejection.
+ */
+export type ValidationFailureHook = (
+  info: ValidationFailureInfo,
+) => void | Promise<void>;
+
+// A Standard Schema failure normalizes to StandardSchemaV1.Issue regardless
+// of which compliant library produced it (zod, valibot, arktype, ...), so
+// this is as specific as `details` can get without picking one schema
+// library over the others this router also supports (joi, effect, decoders,
+// ..., accepted via SchemaLike's duck-typed `parse`/`safeParse`/`validate`
+// branches, whose error shape isn't knowable at the type level).
+type SchemaValidationDetails<S> = S extends AnyStandardSchema
+  ? readonly StandardSchemaV1.Issue[]
+  : any[];
+
+/** Passed to a schema-specific validation failure hook. Same as {@link ValidationFailureInfo} minus `source`, since the hook's name already says which schema failed. */
+export interface SchemaValidationFailureInfo<S extends SchemaLike | undefined> {
+  error: string;
+  details: SchemaValidationDetails<S>;
+  method: HttpMethod;
+  path: string;
+  req: Request;
+}
+
+export type SchemaValidationFailureHook<S extends SchemaLike | undefined> = (
+  info: SchemaValidationFailureInfo<S>,
+) => void | Promise<void>;
+
+// Calls a validation-failure hook without awaiting it (the response is never
+// blocked on a hook), while still catching whatever it throws: a
+// synchronous throw via try/catch, and a rejected promise (if the hook is
+// async) via .catch(), since try/catch alone doesn't observe a rejection
+// that happens after the synchronous part of the call returns.
+function callHookSafely<T>(
+  hook: ((info: T) => void | Promise<void>) | undefined,
+  info: T,
+): void {
+  if (!hook) return;
+  try {
+    hook(info)?.catch?.(() => {});
+  } catch {}
+}
+
+/**
+ * Router-wide validation failure hook. Schema-specific hooks aren't
+ * available here: a router spans many routes, each with its own (possibly
+ * different) bodySchema/querySchema/paramsSchema, so there's no single
+ * schema to type this against.
+ */
+export interface RouterHooks {
+  /** Runs for every route on this router, after any per-route hooks below. */
+  onValidationFailure?: ValidationFailureHook;
+}
+
+/**
+ * Per-route lifecycle hooks, grouped under one `hooks` option so adding a
+ * future hook doesn't grow the flat option list. `onBodyValidationFailure`/
+ * `onQueryValidationFailure`/`onParamsValidationFailure` are typed to that
+ * route's own schema; `onValidationFailure` covers all three sources with
+ * `details: any[]`, for narrowing on `source` yourself instead.
+ */
+export interface RouteHooks<
+  BodySchema extends SchemaLike | undefined = undefined,
+  QuerySchema extends SchemaLike | undefined = undefined,
+  ParamsSchema extends SchemaLike | undefined = undefined,
+> {
+  /** Runs for a failure from any of the three schemas below. Fires after them, before the router's global hook. */
+  onValidationFailure?: ValidationFailureHook;
+  /** Runs only when bodySchema rejects the request, before onValidationFailure and the global hook. `details` is typed to bodySchema's own issue shape. */
+  onBodyValidationFailure?: SchemaValidationFailureHook<BodySchema>;
+  /** Runs only when querySchema rejects the request, before onValidationFailure and the global hook. `details` is typed to querySchema's own issue shape. */
+  onQueryValidationFailure?: SchemaValidationFailureHook<QuerySchema>;
+  /** Runs only when paramsSchema rejects the request, before onValidationFailure and the global hook. `details` is typed to paramsSchema's own issue shape. */
+  onParamsValidationFailure?: SchemaValidationFailureHook<ParamsSchema>;
+}
+
 export interface RouteOptions<
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
@@ -723,6 +819,8 @@ export interface RouteOptions<
    * string-arrival caveat as `querySchema` applies; see its docs above.
    */
   paramsSchema?: ParamsSchema;
+  /** hooks.onValidationFailure runs in addition to the router's global hook (set via createTypedRouterWithConfig or router.onValidationFailure()), if both are set. */
+  hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
   middleware?: TypedMiddleware<any, any>[];
   tags?: string[];
   description?: string;
@@ -1541,10 +1639,31 @@ export class TypedRouter<
   // When specOutputPath is set, this debounced writer rewrites the spec file as
   // newly observed response schemas come in, so file-watch type-gen stays fresh.
   private scheduleSpecWrite?: (() => void) | undefined;
+  // Set via createTypedRouterWithConfig; applies to every route registered
+  // directly on this router. Does not propagate to separately-created
+  // sub-routers mounted with .mount()/.use(). Pass the same hook to each
+  // router's config if you want it shared across all of them.
+  private globalValidationFailureHook?: ValidationFailureHook | undefined;
 
   constructor() {
     this.router = express.Router();
     _typedRouterRegistry.set(this.router, this);
+  }
+  /**
+   * Set the global validation failure hook. Called for every route
+   * registered directly on this router when bodySchema/querySchema/
+   * paramsSchema rejects a request. Works the same whether the router came
+   * from createTypedRouter() or createTypedRouterWithConfig({ onValidationFailure }),
+   * so you're not locked into the config-taking factory just to add this later.
+   *
+   * @example
+   * const router = createTypedRouter().onValidationFailure((info) => {
+   *   logger.warn(info, 'request validation failed');
+   * });
+   */
+  onValidationFailure(hook: ValidationFailureHook): TypedRouter<Req, Locals> {
+    this.globalValidationFailureHook = hook;
+    return this;
   }
   /**
    * Add typed middleware that extends the request with additional properties
@@ -1903,6 +2022,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -1932,6 +2052,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -1968,6 +2089,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -1995,6 +2117,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2032,6 +2155,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2059,6 +2183,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2096,6 +2221,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2123,6 +2249,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2158,6 +2285,7 @@ export class TypedRouter<
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2183,6 +2311,7 @@ export class TypedRouter<
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2218,6 +2347,7 @@ export class TypedRouter<
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2243,6 +2373,7 @@ export class TypedRouter<
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2278,6 +2409,7 @@ export class TypedRouter<
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2303,6 +2435,7 @@ export class TypedRouter<
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2340,6 +2473,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2367,6 +2501,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
       middleware?: [...M];
     },
     handler: RouteHandlerFromOptions<
@@ -2414,19 +2549,52 @@ export class TypedRouter<
       if (options.middleware) {
         middlewares.push(...options.middleware);
       }
+      const onValidationFailure = options.hooks?.onValidationFailure as
+        | ValidationFailureHook
+        | undefined;
+      const onBodyValidationFailure = options.hooks?.onBodyValidationFailure as
+        | SchemaValidationFailureHook<any>
+        | undefined;
+      const onQueryValidationFailure = options.hooks
+        ?.onQueryValidationFailure as SchemaValidationFailureHook<any> | undefined;
+      const onParamsValidationFailure = options.hooks
+        ?.onParamsValidationFailure as
+        | SchemaValidationFailureHook<any>
+        | undefined;
       if (options.bodySchema) {
         middlewares.push(
-          this.createBodyValidationMiddleware(options.bodySchema),
+          this.createBodyValidationMiddleware(
+            options.bodySchema,
+            method,
+            path,
+            options.pathExample,
+            onValidationFailure,
+            onBodyValidationFailure,
+          ),
         );
       }
       if (options.querySchema) {
         middlewares.push(
-          this.createQueryValidationMiddleware(options.querySchema),
+          this.createQueryValidationMiddleware(
+            options.querySchema,
+            method,
+            path,
+            options.pathExample,
+            onValidationFailure,
+            onQueryValidationFailure,
+          ),
         );
       }
       if (options.paramsSchema) {
         middlewares.push(
-          this.createParamsValidationMiddleware(options.paramsSchema),
+          this.createParamsValidationMiddleware(
+            options.paramsSchema,
+            method,
+            path,
+            options.pathExample,
+            onValidationFailure,
+            onParamsValidationFailure,
+          ),
         );
       }
       middlewares.push(handler);
@@ -2509,7 +2677,43 @@ export class TypedRouter<
 
     return this;
   }
-  private createBodyValidationMiddleware(schema: any) {
+  // Fires the per-route hook (if given) and the router's global hook (if
+  // set), in that order. Errors thrown by a hook are swallowed, since a broken
+  // logging hook must never take down the 400 response it's observing.
+  private notifyValidationFailure(
+    source: ValidationFailureSource,
+    error: string,
+    details: any[],
+    method: HttpMethod,
+    path: string | RegExp,
+    pathExample: string | undefined,
+    req: Request,
+    routeHook: ValidationFailureHook | undefined,
+    schemaHook: SchemaValidationFailureHook<any> | undefined,
+  ): void {
+    if (!routeHook && !schemaHook && !this.globalValidationFailureHook) return;
+    const info: ValidationFailureInfo = {
+      source,
+      error,
+      details,
+      method,
+      // Same resolution docs use for a RegExp route: a readable pathExample
+      // or a synthesized :name path, never route.toString()'s raw dump.
+      path: resolveDocPath({ path, pathExample }),
+      req,
+    };
+    callHookSafely(schemaHook, info);
+    callHookSafely(routeHook, info);
+    callHookSafely(this.globalValidationFailureHook, info);
+  }
+  private createBodyValidationMiddleware(
+    schema: any,
+    method: HttpMethod,
+    path: string | RegExp,
+    pathExample: string | undefined,
+    onValidationFailure: ValidationFailureHook | undefined,
+    onBodyValidationFailure: SchemaValidationFailureHook<any> | undefined,
+  ) {
     return async (req: Request, res: Response, next: NextFunction) => {
       try {
         const result = safeParseSchema(schema, req.body) as any;
@@ -2519,27 +2723,52 @@ export class TypedRouter<
             : result;
         if (resolved && "issues" in resolved && resolved.issues) {
           // Validation issues
-          res.status(400).json({
-            error: "Validation failed",
-            details: resolved.errors || resolved.issues,
-          });
+          const details = resolved.errors || resolved.issues;
+          this.notifyValidationFailure(
+            "body",
+            "Validation failed",
+            details,
+            method,
+            path,
+            pathExample,
+            req,
+            onValidationFailure,
+            onBodyValidationFailure,
+          );
+          res.status(400).json({ error: "Validation failed", details });
           return;
         }
         req.body = resolved && "value" in resolved ? resolved.value : resolved;
         next();
       } catch (error) {
         if (isSchemaError(error)) {
-          res.status(400).json({
-            error: "Validation failed",
-            details: (error as any).errors || (error as any).issues,
-          });
+          const details = (error as any).errors || (error as any).issues;
+          this.notifyValidationFailure(
+            "body",
+            "Validation failed",
+            details,
+            method,
+            path,
+            pathExample,
+            req,
+            onValidationFailure,
+            onBodyValidationFailure,
+          );
+          res.status(400).json({ error: "Validation failed", details });
         } else {
           next(error);
         }
       }
     };
   }
-  private createParamsValidationMiddleware(schema: any) {
+  private createParamsValidationMiddleware(
+    schema: any,
+    method: HttpMethod,
+    path: string | RegExp,
+    pathExample: string | undefined,
+    onValidationFailure: ValidationFailureHook | undefined,
+    onParamsValidationFailure: SchemaValidationFailureHook<any> | undefined,
+  ) {
     return async (req: Request, res: Response, next: NextFunction) => {
       try {
         const result = safeParseSchema(schema, req.params) as any;
@@ -2548,10 +2777,19 @@ export class TypedRouter<
             ? await result
             : result;
         if (resolved && "issues" in resolved && resolved.issues) {
-          res.status(400).json({
-            error: "Validation failed",
-            details: resolved.errors || resolved.issues,
-          });
+          const details = resolved.errors || resolved.issues;
+          this.notifyValidationFailure(
+            "params",
+            "Validation failed",
+            details,
+            method,
+            path,
+            pathExample,
+            req,
+            onValidationFailure,
+            onParamsValidationFailure,
+          );
+          res.status(400).json({ error: "Validation failed", details });
           return;
         }
         // Unlike req.query, req.params is a plain writable own property in
@@ -2561,17 +2799,33 @@ export class TypedRouter<
         next();
       } catch (error) {
         if (isSchemaError(error)) {
-          res.status(400).json({
-            error: "Validation failed",
-            details: (error as any).errors || (error as any).issues,
-          });
+          const details = (error as any).errors || (error as any).issues;
+          this.notifyValidationFailure(
+            "params",
+            "Validation failed",
+            details,
+            method,
+            path,
+            pathExample,
+            req,
+            onValidationFailure,
+            onParamsValidationFailure,
+          );
+          res.status(400).json({ error: "Validation failed", details });
         } else {
           next(error);
         }
       }
     };
   }
-  private createQueryValidationMiddleware(schema: any) {
+  private createQueryValidationMiddleware(
+    schema: any,
+    method: HttpMethod,
+    path: string | RegExp,
+    pathExample: string | undefined,
+    onValidationFailure: ValidationFailureHook | undefined,
+    onQueryValidationFailure: SchemaValidationFailureHook<any> | undefined,
+  ) {
     return async (req: Request, res: Response, next: NextFunction) => {
       try {
         const result = safeParseSchema(schema, req.query) as any;
@@ -2580,10 +2834,19 @@ export class TypedRouter<
             ? await result
             : result;
         if (resolved && "issues" in resolved && resolved.issues) {
-          res.status(400).json({
-            error: "Validation failed",
-            details: resolved.errors || resolved.issues,
-          });
+          const details = resolved.errors || resolved.issues;
+          this.notifyValidationFailure(
+            "query",
+            "Validation failed",
+            details,
+            method,
+            path,
+            pathExample,
+            req,
+            onValidationFailure,
+            onQueryValidationFailure,
+          );
+          res.status(400).json({ error: "Validation failed", details });
           return;
         }
         const validatedQuery =
@@ -2598,10 +2861,19 @@ export class TypedRouter<
         next();
       } catch (error) {
         if (isSchemaError(error)) {
-          res.status(400).json({
-            error: "Validation failed",
-            details: (error as any).errors || (error as any).issues,
-          });
+          const details = (error as any).errors || (error as any).issues;
+          this.notifyValidationFailure(
+            "query",
+            "Validation failed",
+            details,
+            method,
+            path,
+            pathExample,
+            req,
+            onValidationFailure,
+            onQueryValidationFailure,
+          );
+          res.status(400).json({ error: "Validation failed", details });
         } else {
           next(error);
         }
@@ -2644,6 +2916,7 @@ export function createTypedRouter<
  *
  * @property validateInput - (Future) Whether to enable global input validation.
  * @property errorHandler - Optional global error handler middleware for the router.
+ * @property hooks.onValidationFailure - Called for every validation failure on this router, in addition to any per-route hook.
  */
 export interface RouterConfig {
   validateInput?: boolean;
@@ -2653,6 +2926,7 @@ export interface RouterConfig {
     res: Response,
     next: NextFunction,
   ) => void;
+  hooks?: RouterHooks;
 }
 
 /**
@@ -2679,6 +2953,9 @@ export function createTypedRouterWithConfig<
   const router = new TypedRouter<Req, Locals>();
   if (config?.errorHandler) {
     router.getRouter().use(config.errorHandler);
+  }
+  if (config?.hooks?.onValidationFailure) {
+    router.onValidationFailure(config.hooks.onValidationFailure);
   }
   return router;
 }

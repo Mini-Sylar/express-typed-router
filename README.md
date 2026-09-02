@@ -127,6 +127,97 @@ router.get("/static/*", handler); // { "0": string }
 
 ---
 
+## Validation failure hooks
+
+`bodySchema`/`querySchema`/`paramsSchema` already return a 400 on failure. `hooks.onValidationFailure` lets you observe that failure too, for logging or tracking, without changing the response. It lives under `hooks` rather than as its own option, so a future hook has somewhere to go without the option list growing flatter each time:
+
+```ts
+router.post(
+  "/users",
+  {
+    bodySchema: UserSchema,
+    hooks: {
+      onValidationFailure: ({ source, error, details, method, path }) => {
+        logger.warn({ source, method, path, details }, "request validation failed");
+      },
+    },
+  },
+  handler,
+);
+```
+
+Set it globally to catch every route's failures in one place, whichever way you created the router:
+
+```ts
+// Plain createTypedRouter(): add it after the fact, same as .useMiddleware()
+const router = createTypedRouter().onValidationFailure(({ source, method, path }) => {
+  metrics.increment(`validation_failure.${source}`, { method, path });
+});
+
+// Or set it at creation time
+const router = createTypedRouterWithConfig({
+  hooks: {
+    onValidationFailure: ({ source, method, path }) => {
+      metrics.increment(`validation_failure.${source}`, { method, path });
+    },
+  },
+});
+```
+
+Both fire if both are set, global hook after the route's own. The hook receives `req` too, for anything else you want to log. It only observes; nothing it does changes the response, and if it throws, the error is swallowed rather than breaking the 400 it was watching.
+
+> The global hook applies only to routes registered directly on that router. A sub-router created with its own `createTypedRouter()` and later `.mount()`ed doesn't inherit it. Pass the same function to each router's config if you want it shared across all of them.
+
+`router.onValidationFailure()` can be called any time, before or after routes are registered. Every route reads it fresh at request time, not at registration time, so calling it last still covers routes you defined earlier.
+
+A hook can be `async`. The response is never delayed waiting for it, and a rejected promise is caught the same as a synchronous throw, so a slow or failing hook (e.g. a logging call that times out) can't slow down or break the request it's observing.
+
+### Per-schema hooks
+
+`onValidationFailure` covers all three sources at once, narrowing on `source` yourself if you need to tell them apart. If you'd rather have three separate hooks, each typed to that route's own schema instead of `details: any[]`, they're there too:
+
+```ts
+router.post(
+  "/users",
+  {
+    bodySchema: UserSchema,
+    querySchema: QuerySchema,
+    hooks: {
+      onBodyValidationFailure: ({ details }) => {
+        // details is UserSchema's own issue shape, not a blanket any[]
+      },
+      onQueryValidationFailure: ({ details }) => {
+        // details is QuerySchema's own issue shape
+      },
+    },
+  },
+  handler,
+);
+```
+
+All four can be set together on the same route; whichever ones apply to the failing source all fire, in this order:
+
+1. The schema-specific hook (`onBodyValidationFailure`, `onQueryValidationFailure`, or `onParamsValidationFailure`), whichever matches the source that failed.
+2. The route's own `onValidationFailure`.
+3. The router's global `onValidationFailure` (from `createTypedRouterWithConfig` or `router.onValidationFailure()`).
+
+The per-schema hooks are only precisely typed when the schema is Standard Schema compliant (zod, valibot, arktype, and others that implement it). `details` is `any[]` for schemas accepted through the older `parse`/`safeParse`/`validate` duck-typed path, since their error shape isn't knowable at the type level.
+
+**Defining one outside the route, to reuse across several:** `SchemaValidationFailureHook<S>` and `ValidationFailureHook` are both exported, so a hook doesn't have to be written inline:
+
+```ts
+import { type SchemaValidationFailureHook } from "@minisylar/express-typed-router";
+
+const logUserBodyFailure: SchemaValidationFailureHook<typeof UserSchema> = ({ details }) => {
+  logger.warn({ issues: details }, "user body validation failed");
+};
+
+router.post("/users", { bodySchema: UserSchema, hooks: { onBodyValidationFailure: logUserBodyFailure } }, handler);
+router.put("/users/:id", { bodySchema: UserSchema, hooks: { onBodyValidationFailure: logUserBodyFailure } }, handler);
+```
+
+---
+
 ## Middleware typing
 
 Declare what a middleware adds to `req`, and that type flows into every handler that uses it.
@@ -661,14 +752,17 @@ Use a schema that actually parses the text:
 | ---------------------------------------- | ------------------------------------------------ |
 | `createTypedRouter()`                    | Create a router                                  |
 | `createTypedRouterWithMiddleware(...mw)` | Create a router pre-configured with middleware   |
-| `createTypedRouterWithConfig(config)`    | Create a router with custom error handling       |
+| `createTypedRouterWithConfig(config)`    | Create a router with an error handler and/or global config |
 | `router.useMiddleware(mw)`               | Add typed global middleware (returns new router) |
+| `router.onValidationFailure(hook)`       | Set the global validation failure hook (returns same router) |
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |
 | `generateOpenApiSpec(routers, options)`  | Build the spec object with no server involved    |
 | `TypedMiddleware<T>`                     | Type helper for middleware that extends `req`    |
 | `defineMiddleware(...mw)`                | Keep a middleware array's tuple type when reused |
+| `SchemaValidationFailureHook<S>`         | Type a reusable `onBodyValidationFailure`/`onQueryValidationFailure`/`onParamsValidationFailure` outside the route |
+| `ValidationFailureHook`                  | Type a reusable `onValidationFailure` outside the route |
 
 ---
 
