@@ -915,13 +915,14 @@ export interface RouteOptions<
   /** Exclude this route from the generated OpenAPI spec entirely. */
   hidden?: boolean;
   /**
-   * Only used when `path` is a `RegExp`. A readable stand-in path (e.g.
-   * `/legacy/:id`) for the OpenAPI doc, since one can't be derived from a
-   * `RegExp` value. Defaults to `regex.toString()`. Doc-only — `req.params`
-   * types as `Record<string, string>` for RegExp routes unless overridden
-   * by `paramsSchema`.
+   * Stand-in path(s) for the OpenAPI doc. Required for a `RegExp` route
+   * (defaults to `regex.toString()` otherwise); optional for a string
+   * route, to override an ambiguous auto-converted path. An array documents
+   * the route under multiple paths at once (e.g. a wildcard that's commonly
+   * hit a few different ways), one spec entry per element. Doc-only,
+   * doesn't affect `req.params`.
    */
-  pathExample?: string;
+  pathExample?: string | string[];
 }
 
 /**
@@ -1076,8 +1077,8 @@ export interface DocsOptions {
 interface RouteMetadata {
   method: HttpMethod;
   path: string | RegExp;
-  /** Doc-only path override for RegExp routes — see RouteOptions.pathExample. */
-  pathExample?: string | undefined;
+  /** Doc-only path override — see RouteOptions.pathExample. */
+  pathExample?: string | string[] | undefined;
   bodySchema?: AnyStandardSchema | undefined;
   querySchema?: AnyStandardSchema | undefined;
   paramsSchema?: AnyStandardSchema | undefined;
@@ -1156,19 +1157,18 @@ function toExpressPath(path: string | RegExp): string | RegExp {
     : path;
 }
 
-// Resolves any route's path into an Express-style string — :name and
-// (?<name>...) tokens alike — so callers can feed it straight into
-// expressPathToOpenApi/extractPathParamNames/autoTag/autoSummary without a
-// separate RegExp code path. A RegExp with no pathExample is synthesized
-// from its source: unnamed capturing groups become positional :0, :1, ...
-// matching how Express itself numbers them in req.params, so the doc always
-// reflects what a request actually gets — never route.toString()'s raw dump.
+// pathExample overrides either path type. A RegExp with none is synthesized
+// from its source, unnamed groups become :0, :1, ... An array pathExample
+// resolves to its first element here; use resolveDocPaths for all of them.
 function resolveDocPath(route: {
   path: string | RegExp;
-  pathExample?: string | undefined;
+  pathExample?: string | string[] | undefined;
 }): string {
+  const example = Array.isArray(route.pathExample)
+    ? route.pathExample[0]
+    : route.pathExample;
+  if (example) return example;
   if (typeof route.path === "string") return route.path;
-  if (route.pathExample) return route.pathExample;
   let index = 0;
   return route.path.source
     .replace(/\\\//g, "/")
@@ -1263,8 +1263,13 @@ function regexAlternativeToDocPath(source: string): string {
 
 function resolveDocPaths(route: {
   path: string | RegExp;
-  pathExample?: string | undefined;
+  pathExample?: string | string[] | undefined;
 }): string[] {
+  // An array pathExample documents the route under each one, one spec
+  // entry per element, same operation.
+  if (Array.isArray(route.pathExample) && route.pathExample.length > 0) {
+    return route.pathExample;
+  }
   if (typeof route.path === "string" || route.pathExample) {
     return [resolveDocPath(route)];
   }
@@ -1894,10 +1899,14 @@ export class TypedRouter<
     const mounted = this.mountedRouters.flatMap(({ prefix, router }) =>
       router.getRouteMetadata().map((meta) => ({
         ...meta,
-        // Can't string-concat a prefix onto a RegExp; prefix pathExample instead.
+        // Can't string-concat a prefix onto a RegExp; prefix pathExample
+        // instead, every alternative if there's more than one.
         ...(typeof meta.path === "string"
           ? { path: prefix + meta.path }
-          : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
+          : {
+              path: meta.path,
+              pathExample: resolveDocPaths(meta).map((p) => prefix + p),
+            }),
       })),
     );
     return [...this.routes, ...mounted];
@@ -2817,7 +2826,7 @@ export class TypedRouter<
     schema: any,
     method: HttpMethod,
     path: string | RegExp,
-    pathExample: string | undefined,
+    pathExample: string | string[] | undefined,
     onValidationFailure: ValidationFailureHook | undefined,
     onBodyValidationFailure: SchemaValidationFailureHook<any> | undefined,
   ) {
@@ -2890,7 +2899,7 @@ export class TypedRouter<
     schema: any,
     method: HttpMethod,
     path: string | RegExp,
-    pathExample: string | undefined,
+    pathExample: string | string[] | undefined,
     onValidationFailure: ValidationFailureHook | undefined,
     onParamsValidationFailure: SchemaValidationFailureHook<any> | undefined,
   ) {
@@ -2965,7 +2974,7 @@ export class TypedRouter<
     schema: any,
     method: HttpMethod,
     path: string | RegExp,
-    pathExample: string | undefined,
+    pathExample: string | string[] | undefined,
     onValidationFailure: ValidationFailureHook | undefined,
     onQueryValidationFailure: SchemaValidationFailureHook<any> | undefined,
   ) {
@@ -3197,7 +3206,10 @@ function mergeRouterMetadata(
       ...meta,
       ...(typeof meta.path === "string"
         ? { path: prefix + meta.path }
-        : { path: meta.path, pathExample: prefix + resolveDocPath(meta) }),
+        : {
+            path: meta.path,
+            pathExample: resolveDocPaths(meta).map((p) => prefix + p),
+          }),
     })),
   );
 }
