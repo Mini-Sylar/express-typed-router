@@ -1,3 +1,9 @@
+## [1.9.10](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.9...v1.9.10) (2026-09-03)
+
+### Bug Fixes
+
+* **router:** let pathExample override a string route's doc path, and take an array ([e2f798d](https://github.com/Mini-Sylar/express-typed-router/commit/e2f798d77547fc4d990efdae4506dac315e4329b))
+
 ## [1.9.9](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.8...v1.9.9) (2026-09-03)
 
 ### Bug Fixes
