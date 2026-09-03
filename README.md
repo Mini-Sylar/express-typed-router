@@ -127,6 +127,182 @@ router.get("/static/*", handler); // { "0": string }
 
 ---
 
+## Validation failure hooks
+
+`bodySchema`/`querySchema`/`paramsSchema` already reject a bad request with a 400. Hooks let you react to that failure, and for three of them, change what happens next. There are two kinds:
+
+- **`onValidationFailure`** (route or global) — a side effect only: logging, metrics, alerts. It never changes the response.
+- **`onBodyValidationFailure`, `onQueryValidationFailure`, `onParamsValidationFailure`** — one per schema. These *can* change the response: keep the default 400, send something else, or let the request through anyway. Covered below.
+
+### The `info` object
+
+Every hook is called with one object:
+
+| field | type | what it is |
+| --- | --- | --- |
+| `source` | `"body" \| "query" \| "params"` | which schema failed — only on `onValidationFailure`; the schema-specific hooks already know from their own name |
+| `error` | `string` | short error message |
+| `details` | that schema's own issue shape once narrowed | the validation issues themselves. On the route's `onValidationFailure`, narrow on `source` first (it's a discriminated union). On the global `onValidationFailure`, always `any[]`, it isn't tied to one route's schemas. |
+| `method` | `string` | the route's HTTP method, e.g. `"post"` |
+| `path` | `string` | the route's path, readable even for a `RegExp` route |
+| `req` | Express `Request` | the request; also sees this route's `middleware`-added properties (route-level hooks) or the router's `useMiddleware()`-added properties (global), see below |
+| `res` | Express `Response` | the response — schema-specific hooks only, that's how they change it |
+| `next` | Express `NextFunction` | continues the request — schema-specific hooks only |
+
+### Just reacting to a failure
+
+```ts
+router.post(
+  "/users",
+  {
+    bodySchema: UserSchema,
+    querySchema: QuerySchema,
+    hooks: {
+      onValidationFailure: (info) => {
+        if (info.source === "body") {
+          logger.warn({ issues: info.details }, "user body validation failed"); // UserSchema's own issue shape
+        } else if (info.source === "query") {
+          logger.warn({ issues: info.details }, "user query validation failed"); // QuerySchema's own issue shape
+        }
+      },
+    },
+  },
+  handler,
+);
+
+// Or globally, for every route on the router — details is always any[] here,
+// a route's own onValidationFailure above is the one that narrows per schema.
+createTypedRouter().onValidationFailure(({ source, method, path }) => metrics.increment(source));
+createTypedRouterWithConfig({ hooks: { onValidationFailure: (info) => metrics.increment(info.source) } });
+```
+
+Narrowing on `info.source` is what gives you the precise `details` type per branch; unnarrowed, it's whatever's common to all three. The 400 is sent regardless of what this hook does. It can be `async`; a throw or rejection is swallowed, the response never waits on it. `router.onValidationFailure()` can be called any time, read fresh per request, and picks up whatever `.useMiddleware()` already added by that point in the chain, no cast needed:
+
+```ts
+const router = createTypedRouter()
+  .useMiddleware(requireAuth) // adds req.userId
+  .onValidationFailure((info) => {
+    metrics.increment(`validation_failure.${info.source}`, { userId: info.req.userId });
+  });
+```
+
+`createTypedRouterWithConfig<Req>({ hooks: { onValidationFailure } })` works the same way, `Req` just has to be spelled out explicitly since there's no `.useMiddleware()` call for it to infer from:
+
+```ts
+const router = createTypedRouterWithConfig<{ userId: string }>({
+  hooks: { onValidationFailure: (info) => metrics.increment(info.source, { userId: info.req.userId }) },
+});
+```
+
+The global hook doesn't inherit into a `.mount()`ed sub-router, pass the same function to each router if you want it everywhere.
+
+The route's own `onValidationFailure` gets this too, same as its schema-specific siblings, from that route's `middleware` option:
+
+```ts
+router.post(
+  "/orders",
+  {
+    bodySchema: OrderSchema,
+    middleware: [requireAuth], // adds req.userId
+    hooks: {
+      onValidationFailure: (info) => logger.warn({ userId: info.req.userId, source: info.source }, "validation failed"),
+    },
+  },
+  handler,
+);
+```
+
+### Changing the response
+
+`onBodyValidationFailure`, `onQueryValidationFailure`, `onParamsValidationFailure` are typed to that one schema (`details` is its own issue shape, not a blanket `any[]`), and the router waits for them before responding:
+
+```ts
+import { defaultValidationHandler } from "@minisylar/express-typed-router";
+// ^ the library's own default 400 response, exported so a hook can run a
+// side effect and still fall back to it, instead of re-implementing it.
+
+router.post(
+  "/orders",
+  {
+    bodySchema: OrderSchema,
+    hooks: {
+      onBodyValidationFailure: (info) => {
+        logger.warn({ issues: info.details }, "order validation failed");
+        return defaultValidationHandler(info); // side effect above, still the normal 400
+      },
+    },
+  },
+  handler,
+);
+```
+
+What a hook does decides the outcome:
+
+| does this | result |
+| --- | --- |
+| nothing | default 400, same as if there were no hook |
+| `defaultValidationHandler(info)` | default 400, after whatever the hook did first |
+| `info.res.status(422).json(...)` | that response instead |
+| `info.next()` | request continues unvalidated; `req.body` stays typed as `OrderSchema`'s output either way, you're trusting it yourself |
+
+### Order
+
+A request only ever fails one schema, whichever is checked first (body, then query, then params). So on the `/users` route above, a request with both an invalid body *and* an invalid query string still only fails on `body`, query is never even checked:
+
+- `onBodyValidationFailure` fires (if set)
+- `onValidationFailure` fires once, with `source: "body"` — not twice, and `onQueryValidationFailure` does not fire
+- the global `onValidationFailure` fires once, same `source: "body"`
+
+Fix the body and resend, and *then* you'd see the query failure. Whichever hooks apply to that one failure run in this order: the schema-specific one, then the route's `onValidationFailure`, then the global one.
+
+### Reading middleware-added properties
+
+A route's own `middleware` (see [Middleware typing](#middleware-typing) below) runs before validation, and what it adds to `req` is visible, typed, inside a schema-specific hook too, no cast needed, as long as the hook is written inline:
+
+```ts
+router.post(
+  "/orders",
+  {
+    bodySchema: OrderSchema,
+    middleware: [requireAuth], // adds req.userId
+    hooks: {
+      onBodyValidationFailure: (info) => {
+        if (info.req.userId === "trusted-internal-service") return info.next();
+        info.res.status(422).json({ error: "Invalid order payload" });
+      },
+    },
+  },
+  handler,
+);
+```
+
+A hook pulled out into a standalone `const` can't know which route's `middleware` it'll be attached to, so it falls back to plain `req` there, see reuse below.
+
+### Reuse outside the route
+
+`SchemaValidationFailureHook<S>` / `ValidationFailureHook` are exported, so a hook doesn't have to be written inline:
+
+```ts
+const logUserBodyFailure: SchemaValidationFailureHook<typeof UserSchema> = ({ details }) => {
+  logger.warn({ issues: details }, "user body validation failed");
+};
+
+router.post("/users", { bodySchema: UserSchema, hooks: { onBodyValidationFailure: logUserBodyFailure } }, handler);
+router.put("/users/:id", { bodySchema: UserSchema, hooks: { onBodyValidationFailure: logUserBodyFailure } }, handler);
+```
+
+### At a glance
+
+| hook | fires when | can change the response | `details` |
+| --- | --- | --- | --- |
+| `onBodyValidationFailure` | `bodySchema` rejects | yes | `bodySchema`'s own issue shape |
+| `onQueryValidationFailure` | `querySchema` rejects | yes | `querySchema`'s own issue shape |
+| `onParamsValidationFailure` | `paramsSchema` rejects | yes | `paramsSchema`'s own issue shape |
+| `onValidationFailure` (route option) | any of the three, on this route | no | matching schema's issue shape, once narrowed on `source` |
+| `onValidationFailure` (`router.onValidationFailure()` / `createTypedRouterWithConfig`) | any of the three, on any route on this router | no | `any[]` |
+
+---
+
 ## Middleware typing
 
 Declare what a middleware adds to `req`, and that type flows into every handler that uses it.
@@ -661,14 +837,19 @@ Use a schema that actually parses the text:
 | ---------------------------------------- | ------------------------------------------------ |
 | `createTypedRouter()`                    | Create a router                                  |
 | `createTypedRouterWithMiddleware(...mw)` | Create a router pre-configured with middleware   |
-| `createTypedRouterWithConfig(config)`    | Create a router with custom error handling       |
+| `createTypedRouterWithConfig(config)`    | Create a router with an error handler and/or global config |
 | `router.useMiddleware(mw)`               | Add typed global middleware (returns new router) |
+| `router.onValidationFailure(hook)`       | Set the global validation failure hook (returns same router) |
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |
 | `generateOpenApiSpec(routers, options)`  | Build the spec object with no server involved    |
 | `TypedMiddleware<T>`                     | Type helper for middleware that extends `req`    |
 | `defineMiddleware(...mw)`                | Keep a middleware array's tuple type when reused |
+| `SchemaValidationFailureHook<S>`         | Type a reusable `onBodyValidationFailure`/`onQueryValidationFailure`/`onParamsValidationFailure` outside the route |
+| `RouteValidationFailureHook<Body, Query, Params>` | Type a reusable route-level `onValidationFailure` outside the route, `details` still narrows on `source` |
+| `ValidationFailureHook`                  | Type a reusable global `onValidationFailure` outside the route |
+| `defaultValidationHandler(info)`         | The library's own default 400 response, callable from a schema-specific hook |
 
 ---
 
