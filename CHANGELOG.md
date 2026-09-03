@@ -1,3 +1,11 @@
+## [1.9.9](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.8...v1.9.9) (2026-09-03)
+
+### Bug Fixes
+
+* add validation failure hooks ([#15](https://github.com/Mini-Sylar/express-typed-router/issues/15)) ([074b5c6](https://github.com/Mini-Sylar/express-typed-router/commit/074b5c6b257fd15aa8fe3a9c0766ca5b8b746557))
+* let validation-failure hooks control the response ([b61eaec](https://github.com/Mini-Sylar/express-typed-router/commit/b61eaecf4b38ab12058615b47fbfbd5840c96df3))
+* **router:** expand regex alternatives in OpenAPI docs ([27bfc5c](https://github.com/Mini-Sylar/express-typed-router/commit/27bfc5c3a133e46def8920697763de58f3a295e4)), closes [#16](https://github.com/Mini-Sylar/express-typed-router/issues/16)
+
 ## [1.9.8](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.7...v1.9.8) (2026-08-26)
 
 ### Bug Fixes
