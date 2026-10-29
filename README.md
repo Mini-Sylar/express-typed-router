@@ -516,6 +516,14 @@ else 200. A schema in `responses` wins over one inferred from traffic;
 without one, an inferred schema for that status is kept under your
 description.
 
+A route with a `bodySchema`, `querySchema` or `paramsSchema` gets its 400
+documented for you: the body the library sends when validation fails
+(`{ error: "Validation failed", details: [...] }`), as a shared
+`ValidationError` schema. Document your own 400 to replace it, or turn it
+off with `documentValidationErrors: false`. A route whose
+`onBodyValidationFailure` (or query/params) hook can send something else gets
+the description only.
+
 ### Typed responses
 
 With a `responseSchema`, or schemas in `responses`, `res.json()` is typed by

@@ -1261,6 +1261,14 @@ export interface DocsOptions {
    * schemas: { Order: OrderSchema, Error: ErrorSchema }
    */
   schemas?: Record<string, AnyStandardSchema>;
+  /**
+   * Document the 400 a route answers when its body, query or params fail
+   * validation, as the `ValidationError` schema (unless the route documents
+   * its own 400). A route whose schema-specific failure hook may send
+   * something else gets the description only.
+   * @default true
+   */
+  documentValidationErrors?: boolean;
 }
 
 interface RouteMetadata {
@@ -1278,6 +1286,9 @@ interface RouteMetadata {
   responseSchema?: AnyStandardSchema | undefined;
   responses?: Record<number, ResponseDoc> | undefined;
   security?: SecurityRequirement[] | undefined;
+  // A schema-specific validation failure hook, which may answer a bad request
+  // with something other than the default 400
+  customValidationResponse?: boolean | undefined;
   hidden?: boolean | undefined;
   // Per status code: a JSON Schema inferred (and merged) from observed
   // responses, plus an optional real example (only in "live" mode).
@@ -1787,8 +1798,40 @@ function schemaName(
   return typeof $id === "string" && /^[A-Za-z0-9._-]+$/.test($id) ? $id : undefined;
 }
 
+// The body of the default 400 (see defaultValidationHandler)
+const VALIDATION_ERROR_SCHEMA = {
+  type: "object",
+  description: "The request's body, query or params didn't match the route's schema",
+  properties: {
+    error: { type: "string", const: "Validation failed" },
+    details: {
+      type: "array",
+      description: "What was wrong, one entry per problem",
+      items: {
+        type: "object",
+        properties: {
+          message: { type: "string" },
+          path: {
+            type: "array",
+            description: "Where the problem is, e.g. [\"amount\"] or [\"items\", 0, \"id\"]",
+            items: {},
+          },
+        },
+        required: ["message"],
+      },
+    },
+  },
+  required: ["error", "details"],
+};
+
 class SchemaComponents {
   readonly schemas: Record<string, Record<string, any>> = Object.create(null);
+
+  /** A JSON Schema (not a validator's schema) as a named component, as a $ref */
+  json(name: string, schema: Record<string, any>): Record<string, any> {
+    this.add(name, schema);
+    return { $ref: COMPONENT_REF + name };
+  }
   // The docs' `schemas`, by the schema object itself
   private readonly named = new WeakMap<object, string>();
 
@@ -1986,7 +2029,17 @@ async function buildOpenApiSpec(
         }
         responses[code] = response;
       }
-      if (Object.keys(responses).length === 0) {
+      // A route that validates its input can answer 400 with the library's own body
+      const validatesInput = route.bodySchema || route.querySchema || route.paramsSchema;
+      if (validatesInput && options.documentValidationErrors !== false && !responses["400"]) {
+        responses["400"] = route.customValidationResponse
+          ? { description: "The request failed validation" }
+          : {
+              description: "The request failed validation",
+              content: { "application/json": { schema: components.json("ValidationError", VALIDATION_ERROR_SCHEMA) } },
+            };
+      }
+      if (!Object.keys(responses).some((code) => Number(code) < 400)) {
         responses["200"] = { description: "Success" };
       }
       // In status order, however they were added
@@ -3126,6 +3179,11 @@ export class TypedRouter<
       meta.responseSchema = options.responseSchema;
       meta.responses = options.responses;
       meta.security = options.security;
+      meta.customValidationResponse = Boolean(
+        options.hooks?.onBodyValidationFailure ||
+          options.hooks?.onQueryValidationFailure ||
+          options.hooks?.onParamsValidationFailure,
+      );
       meta.hidden = options.hidden;
       meta.pathExample = options.pathExample;
 
