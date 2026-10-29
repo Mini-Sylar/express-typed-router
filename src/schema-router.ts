@@ -673,6 +673,8 @@ export type SchemaRouteHandler<
   ResponseLocals extends Record<string, any> = {},
   ParamsSchema extends SchemaLike | undefined = undefined,
   ParamsOverride extends Record<string, any> | undefined = undefined,
+  ResponseSchema extends AnyStandardSchema | undefined = undefined,
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
 > = (
   req: SchemaRequest<
     Path,
@@ -682,7 +684,11 @@ export type SchemaRouteHandler<
     ParamsSchema,
     ParamsOverride
   >,
-  res: Response<any, ResponseLocals>,
+  // Plain Express when the route documents no response schemas, so nothing
+  // changes for it
+  res: [ResponseSchema, Responses] extends [undefined, undefined]
+    ? Response<any, ResponseLocals>
+    : TypedResponse<ResponseLocals, ResponseSchema, Responses>,
   next?: NextFunction,
 ) =>
   | void
@@ -690,7 +696,61 @@ export type SchemaRouteHandler<
   | Promise<void | undefined>
   | Response
   | Promise<Response>
-  | Promise<Response | undefined>;
+  | Promise<Response | undefined>
+  | TypedResponse<any, any, any>
+  | Promise<TypedResponse<any, any, any> | undefined>;
+
+// ─── Typed responses ─────────────────────────────────────────────────────────
+// Express gives res.json() one body type for every status. A route's bodies
+// are typed per status instead: a success one (2xx, or no status set) by its
+// responseSchema, any other by the schema `responses` documents for it, and a
+// status with no schema stays untyped, as Express has it. Bodies are typed by
+// the schema's input, since what's sent is run through the schema (extra
+// fields an object picked up elsewhere are allowed, and stripped).
+
+type IsSuccessStatus<Code extends number> = `${Code}` extends `2${number}` ? true : false;
+
+type DocumentedBody<Doc> = Doc extends { schema: infer S }
+  ? S extends AnyStandardSchema
+    ? StandardSchemaV1.InferInput<S>
+    : never
+  : never;
+
+/** The body a route may send with a status, from its responseSchema and `responses` */
+export type ResponseBodyFor<Code extends number, ResponseSchema, Responses> =
+  // A schema documented for this exact status wins
+  Responses extends Record<number, ResponseDoc>
+    ? Code extends keyof Responses
+      ? [DocumentedBody<Responses[Code]>] extends [never]
+        ? SuccessBody<Code, ResponseSchema>
+        : DocumentedBody<Responses[Code]>
+      : SuccessBody<Code, ResponseSchema>
+    : SuccessBody<Code, ResponseSchema>;
+
+type SuccessBody<Code extends number, ResponseSchema> = IsSuccessStatus<Code> extends true
+  ? ResponseSchema extends AnyStandardSchema
+    ? StandardSchemaV1.InferInput<ResponseSchema>
+    : any
+  : any;
+
+/**
+ * `res` for a route with response schemas: Express's Response, with `json()`
+ * (and `status(code).json()`) taking the body that status is documented with.
+ */
+export type TypedResponse<
+  Locals extends Record<string, any>,
+  ResponseSchema,
+  Responses,
+> = Omit<Response<any, Locals>, "json" | "status"> & {
+  /** Sends JSON with the status set (200 if none), as its schema types it */
+  json(body?: ResponseBodyFor<200, ResponseSchema, Responses>): TypedResponse<Locals, ResponseSchema, Responses>;
+  /** Sets the status; `json()` after it takes that status's body */
+  status<Code extends number>(
+    code: Code,
+  ): Omit<TypedResponse<Locals, ResponseSchema, Responses>, "json"> & {
+    json(body?: ResponseBodyFor<Code, ResponseSchema, Responses>): TypedResponse<Locals, ResponseSchema, Responses>;
+  };
+};
 
 /**
  * Options for defining a typed route, including schemas and middleware.
@@ -970,7 +1030,7 @@ type NormalizeHandlerMiddleware<Middleware> =
 
 type InferHandlerOption<
   Options extends InferSchemaHandlerOptions,
-  Key extends "bodySchema" | "querySchema" | "paramsSchema" | "middleware",
+  Key extends "bodySchema" | "querySchema" | "paramsSchema" | "middleware" | "responseSchema" | "responses",
 > = Key extends keyof Options ? Options[Key] : undefined;
 
 /**
@@ -998,7 +1058,9 @@ export type InferSchemaHandler<Options extends InferSchemaHandlerOptions = {}> =
       NormalizeHandlerMiddleware<InferHandlerOption<Options, "middleware">>
     >,
     InferHandlerOption<Options, "paramsSchema">,
-    Record<string, string | string[] | undefined>
+    Record<string, string | string[] | undefined>,
+    InferHandlerOption<Options, "responseSchema">,
+    InferHandlerOption<Options, "responses">
   >;
 
 type RouteHandlerFromOptions<
@@ -1009,13 +1071,18 @@ type RouteHandlerFromOptions<
   RouterReq extends Record<string, any>,
   RouterLocals extends Record<string, any>,
   M extends TypedMiddleware<any, any>[],
+  ResponseSchema extends AnyStandardSchema | undefined = undefined,
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
 > = SchemaRouteHandler<
   Path,
   NoInfer<BodySchema>,
   NoInfer<QuerySchema>,
   RouterReq & InferMiddlewareProps<readonly [...M]>,
   RouterLocals & InferMiddlewareLocals<readonly [...M]>,
-  NoInfer<ParamsSchema>
+  NoInfer<ParamsSchema>,
+  undefined,
+  NoInfer<ResponseSchema>,
+  NoInfer<Responses>
 >;
 
 // Doc-only fields extracted from RouteOptions — merged into typed middleware
@@ -1027,8 +1094,6 @@ type DocMeta = Pick<
   | "summary"
   | "description"
   | "deprecated"
-  | "responseSchema"
-  | "responses"
   | "security"
   | "hidden"
   | "pathExample"
@@ -2390,6 +2455,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2397,6 +2464,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2407,7 +2476,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
@@ -2420,6 +2491,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2427,6 +2500,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2437,7 +2512,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   // Implementation
@@ -2457,6 +2534,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2464,6 +2543,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2474,7 +2555,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   post(
@@ -2485,6 +2568,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2492,6 +2577,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2502,7 +2589,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   post(
@@ -2523,6 +2612,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2530,6 +2621,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2540,7 +2633,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   put(
@@ -2551,6 +2646,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2558,6 +2655,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2568,7 +2667,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   put(
@@ -2589,6 +2690,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2596,6 +2699,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2606,7 +2711,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   patch(
@@ -2617,6 +2724,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2624,6 +2733,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2634,7 +2745,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   patch(
@@ -2654,12 +2767,16 @@ export class TypedRouter<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2670,7 +2787,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   delete(
@@ -2680,12 +2799,16 @@ export class TypedRouter<
   delete<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2696,7 +2819,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   delete(
@@ -2716,12 +2841,16 @@ export class TypedRouter<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2732,7 +2861,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   options(
@@ -2742,12 +2873,16 @@ export class TypedRouter<
   options<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2758,7 +2893,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   options(
@@ -2778,12 +2915,16 @@ export class TypedRouter<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2794,7 +2935,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   head(
@@ -2804,12 +2947,16 @@ export class TypedRouter<
   head<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2820,7 +2967,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   head(
@@ -2841,6 +2990,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2848,6 +2999,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2858,7 +3011,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   all(
@@ -2869,6 +3024,8 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2876,6 +3033,8 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2886,7 +3045,9 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      Responses
     >,
   ): TypedRouter<Req, Locals>;
   all(
