@@ -545,8 +545,8 @@ app.use("/docs", api.docs({ responses: { 503: "Down for maintenance" } }));
 The nearest wins for each status: the route's, then its router's (or a
 parent router's), then the docs'. A description on its own keeps the schema
 from below, so a route can reword a response without losing its body. A
-router's schemas count for `responseValidation`; for typed `res.json()`,
-document the status on the route.
+router's schemas type `res.json()` in every route on it (call
+`.responses()` before adding routes), and count for `responseValidation`.
 
 A route with a `bodySchema`, `querySchema` or `paramsSchema` gets its 400
 documented for you: the body the library sends when validation fails

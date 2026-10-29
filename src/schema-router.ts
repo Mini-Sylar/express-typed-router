@@ -741,6 +741,30 @@ type SuccessBody<Code extends number, ResponseSchema> = IsSuccessStatus<Code> ex
   : any;
 
 /**
+ * A router's documented responses under a route's, as they're layered at
+ * runtime: the route's win for the statuses they document, but a description
+ * on its own keeps the router's schema.
+ */
+export type LayerResponses<Under, Over> =
+  Under extends Record<number, ResponseDoc>
+    ? Over extends Record<number, ResponseDoc>
+      ? {
+          [Code in keyof Under | keyof Over]: Code extends keyof Over
+            ? Over[Code] extends string
+              ? Code extends keyof Under
+                ? Under[Code] extends { schema: infer S }
+                  ? { description: string; schema: S }
+                  : Over[Code]
+                : Over[Code]
+              : Over[Code]
+            : Code extends keyof Under
+              ? Under[Code]
+              : never;
+        }
+      : Under
+    : Over;
+
+/**
  * `res` for a route with response schemas: Express's Response, with `json()`
  * (and `status(code).json()`) taking the body that status is documented with.
  */
@@ -2309,6 +2333,8 @@ export type AdditionalLocals = {};
 export class TypedRouter<
   Req extends Record<string, any> = AdditionalReqProps,
   Locals extends Record<string, any> = AdditionalLocals,
+  // The responses .responses() documents, which type res.json() in its routes
+  RouterResponses extends Record<number, ResponseDoc> | undefined = undefined,
 > {
   private router: express.Router;
   private routes: RouteMetadata[] = [];
@@ -2353,7 +2379,7 @@ export class TypedRouter<
    *   logger.warn(info, 'request validation failed');
    * });
    */
-  onValidationFailure(hook: ValidationFailureHook<Req>): TypedRouter<Req, Locals> {
+  onValidationFailure(hook: ValidationFailureHook<Req>): TypedRouter<Req, Locals, RouterResponses> {
     this.globalValidationFailureHook = hook;
     return this;
   }
@@ -2368,7 +2394,7 @@ export class TypedRouter<
    *   .useMiddleware(requireApiKey)
    *   .security([{ apiKey: [] }]);
    */
-  security(requirements: SecurityRequirement[]): TypedRouter<Req, Locals> {
+  security(requirements: SecurityRequirement[]): TypedRouter<Req, Locals, RouterResponses> {
     this.defaultSecurity = requirements;
     return this;
   }
@@ -2377,7 +2403,7 @@ export class TypedRouter<
    * response schemas; a route's own `responseValidation` wins. See
    * {@link ResponseValidation}.
    */
-  responseValidation(mode: ResponseValidation): TypedRouter<Req, Locals> {
+  responseValidation(mode: ResponseValidation): TypedRouter<Req, Locals, RouterResponses> {
     this.responseValidationMode = mode;
     return this;
   }
@@ -2385,9 +2411,9 @@ export class TypedRouter<
    * Responses this router's routes can give, by status: typically what its
    * middleware answers (a 401 without a key) or its error handler (a 500).
    * Covers routers mounted under it too; a route's own `responses` win for
-   * the statuses they document. Their schemas count for responseValidation on
-   * this router's routes. They don't type res.json(): document a status on
-   * the route for that.
+   * the statuses they document. Their schemas type res.json() in this
+   * router's routes (registered after this call, so call it first), and count
+   * for responseValidation on them.
    *
    * @example
    * const api = createTypedRouter().responses({
@@ -2395,9 +2421,9 @@ export class TypedRouter<
    *   500: { description: "Something went wrong", schema: ApiError },
    * });
    */
-  responses(responses: Record<number, ResponseDoc>): TypedRouter<Req, Locals> {
+  responses<Responses extends Record<number, ResponseDoc>>(responses: Responses): TypedRouter<Req, Locals, Responses> {
     this.defaultResponses = responses;
-    return this;
+    return this as unknown as TypedRouter<Req, Locals, Responses>;
   }
   /**
    * Add typed middleware that extends the request with additional properties
@@ -2416,7 +2442,7 @@ export class TypedRouter<
     TLocals extends Record<string, any> = {},
   >(
     middleware: TypedMiddleware<TReq, TLocals>,
-  ): TypedRouter<Req & TReq, Locals & TLocals> {
+  ): TypedRouter<Req & TReq, Locals & TLocals, RouterResponses> {
     this.router.use(middleware as any);
     return this as any;
   }
@@ -2450,12 +2476,12 @@ export class TypedRouter<
     ...handlers: Array<
       express.RequestHandler | express.Router | TypedRouter<any, any>
     >
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   use(
     ...handlers: Array<
       express.RequestHandler | express.Router | TypedRouter<any, any>
     >
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   use(
     pathOrHandler:
       | string
@@ -2465,7 +2491,7 @@ export class TypedRouter<
     ...rest: Array<
       express.RequestHandler | express.Router | TypedRouter<any, any>
     >
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     const isPath = typeof pathOrHandler === "string";
     const prefix = isPath ? (pathOrHandler as string) : "";
     const rawHandlers = isPath
@@ -2517,12 +2543,12 @@ export class TypedRouter<
   mount(
     prefix: string,
     router: TypedRouter<any, any>,
-  ): TypedRouter<Req, Locals>;
-  mount(router: TypedRouter<any, any>): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
+  mount(router: TypedRouter<any, any>): TypedRouter<Req, Locals, RouterResponses>;
   mount(
     prefixOrRouter: string | TypedRouter<any, any>,
     maybeRouter?: TypedRouter<any, any>,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     if (typeof prefixOrRouter === "string") {
       const sub = maybeRouter!;
       this.router.use(prefixOrRouter, sub.getRouter());
@@ -2751,8 +2777,8 @@ export class TypedRouter<
   // Method overloads for GET requests with automatic middleware type inference
   get<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
 
   // Body/query schema and middleware live as flat sibling properties (not
   // intersected with a separately-generic options type) so TS can infer
@@ -2788,16 +2814,16 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
   // params always type as Record<string, string>.
   get(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   get<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -2828,22 +2854,22 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   // Implementation
   get(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
   } // Combined overload for body/query schema + middleware (most specific first)
   post<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
@@ -2875,14 +2901,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -2913,23 +2939,23 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("post", path, optionsOrHandler, handler);
   }
 
   // PUT method: same overload shape as POST
   put<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
@@ -2961,14 +2987,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -2999,23 +3025,23 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("put", path, optionsOrHandler, handler);
   }
 
   // PATCH method: same overload shape as POST
   patch<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
@@ -3047,14 +3073,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -3085,23 +3111,23 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("patch", path, optionsOrHandler, handler);
   }
 
   // DELETE method: no bodySchema (typically no body)
   delete<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -3131,14 +3157,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
@@ -3167,23 +3193,23 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("delete", path, optionsOrHandler, handler);
   }
 
   // OPTIONS method: no bodySchema (typically used for CORS preflight)
   options<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -3213,14 +3239,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
@@ -3249,23 +3275,23 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("options", path, optionsOrHandler, handler);
   }
 
   // HEAD method: no bodySchema (like GET but only returns headers)
   head<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -3295,14 +3321,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
@@ -3331,23 +3357,23 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("head", path, optionsOrHandler, handler);
   }
 
   // ALL method: same overload shape as POST (matches every HTTP method)
   all<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
@@ -3379,14 +3405,14 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
@@ -3417,15 +3443,15 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses,
+      LayerResponses<RouterResponses, Responses>,
       HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("all", path, optionsOrHandler, handler);
   }
   // Helper method to register routes
@@ -3434,7 +3460,7 @@ export class TypedRouter<
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     const middlewares: any[] = [];
     const meta: RouteMetadata = { method, path, responseSamples: new Map() };
     this.routes.push(meta);
@@ -4005,7 +4031,10 @@ export function createTypedRouter<
  * @property errorHandler - Optional global error handler middleware for the router.
  * @property hooks.onValidationFailure - Called for every validation failure on this router, in addition to any per-route hook.
  */
-export interface RouterConfig<Req extends Record<string, any> = {}> {
+export interface RouterConfig<
+  Req extends Record<string, any> = {},
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
+> {
   validateInput?: boolean;
   errorHandler?: (
     error: any,
@@ -4017,7 +4046,7 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
   /** The security this router's routes need in the docs; see {@link TypedRouter.security}. */
   security?: SecurityRequirement[];
   /** Responses this router's routes can give; see {@link TypedRouter.responses}. */
-  responses?: Record<number, ResponseDoc>;
+  responses?: Responses;
   /**
    * Whether bodies sent by this router's routes are checked against their
    * response schemas (see {@link ResponseValidation}); a route's own setting
@@ -4047,8 +4076,9 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
 export function createTypedRouterWithConfig<
   Req extends Record<string, any> = AdditionalReqProps,
   Locals extends Record<string, any> = AdditionalLocals,
->(config?: RouterConfig<Req>): TypedRouter<Req, Locals> {
-  const router = new TypedRouter<Req, Locals>();
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
+>(config?: RouterConfig<Req, Responses>): TypedRouter<Req, Locals, Responses> {
+  const router = new TypedRouter<Req, Locals, Responses>();
   if (config?.errorHandler) {
     router.getRouter().use(config.errorHandler);
   }
