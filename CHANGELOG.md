@@ -1,3 +1,23 @@
+## [1.10.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.10...v1.10.0) (2026-10-29)
+
+### Features
+
+* **docs:** describe and order tags, and group them under headings ([05e2551](https://github.com/Mini-Sylar/express-typed-router/commit/05e25519d626a681d815ac783e29224227b6ec38))
+* **docs:** document file uploads, and bodies and responses that aren't JSON ([813504d](https://github.com/Mini-Sylar/express-typed-router/commit/813504d2c3d253d402e2c11fa2464ad8b15a0c7c))
+* **docs:** document responses once, for a router or the whole API ([d140a80](https://github.com/Mini-Sylar/express-typed-router/commit/d140a809fd84a6e82db0cb452731e5e8b9d7d41e))
+* **docs:** document validation errors without writing them ([c748d72](https://github.com/Mini-Sylar/express-typed-router/commit/c748d721b4d102ff711a92980300df05afa41286))
+* **docs:** give every operation an operationId ([09da593](https://github.com/Mini-Sylar/express-typed-router/commit/09da593d065f912de3198303dcb9ce634884dc42))
+* **docs:** security schemes, documented responses, and $ref components ([fa11f32](https://github.com/Mini-Sylar/express-typed-router/commit/fa11f32170db8ab1c5ef9f9468736ba9a2e2fe67))
+* **router:** group a route's docs-only options under `docs` ([e80a39d](https://github.com/Mini-Sylar/express-typed-router/commit/e80a39d73076622815663480408188294dc4e4b2))
+* **router:** strip and check response bodies against their schemas ([5492d89](https://github.com/Mini-Sylar/express-typed-router/commit/5492d89a967ab492ad20ddf671fdfb117adf346f))
+* **router:** validate, type and document request headers ([c8ca812](https://github.com/Mini-Sylar/express-typed-router/commit/c8ca81257218fdc3571653b237b63dcc3d7cf3f0))
+* **types:** a router's documented responses type res.json() in its routes ([b848a42](https://github.com/Mini-Sylar/express-typed-router/commit/b848a4270d5cbb2f0eb86d567f3f0cdcc30ad637))
+* **types:** type res.json() by the route's response schemas ([0d847f0](https://github.com/Mini-Sylar/express-typed-router/commit/0d847f098f1e72bc733408602b9e1c29cd1090bb))
+
+### Documentation
+
+* **readme:** lead with createTypedRouter() for responseValidation ([194f23c](https://github.com/Mini-Sylar/express-typed-router/commit/194f23c91129890f0dbf8c7efcbc920056294ccb))
+
 ## [1.9.10](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.9...v1.9.10) (2026-09-03)
 
 ### Bug Fixes
