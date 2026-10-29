@@ -516,6 +516,24 @@ else 200. A schema in `responses` wins over one inferred from traffic;
 without one, an inferred schema for that status is kept under your
 description.
 
+Responses every route behind some middleware can give (a 401, a 500) are
+documented once, on the router, or for the whole API in the docs:
+
+```ts
+const api = createTypedRouter().responses({
+  401: { description: "No valid API key", schema: ApiError },
+  500: { description: "Something went wrong", schema: ApiError },
+});
+
+app.use("/docs", api.docs({ responses: { 503: "Down for maintenance" } }));
+```
+
+The nearest wins for each status: the route's, then its router's (or a
+parent router's), then the docs'. A description on its own keeps the schema
+from below, so a route can reword a response without losing its body. A
+router's schemas count for `responseValidation`; for typed `res.json()`,
+document the status on the route.
+
 A route with a `bodySchema`, `querySchema` or `paramsSchema` gets its 400
 documented for you: the body the library sends when validation fails
 (`{ error: "Validation failed", details: [...] }`), as a shared
@@ -963,6 +981,7 @@ Use a schema that actually parses the text:
 | `router.useMiddleware(mw)`               | Add typed global middleware (returns new router) |
 | `router.onValidationFailure(hook)`       | Set the global validation failure hook (returns same router) |
 | `router.security(requirements)`          | The security this router's routes need in the docs (returns same router) |
+| `router.responses(responses)`            | Responses this router's routes can give, documented once (returns same router) |
 | `router.responseValidation(mode)`        | Check bodies sent against their response schema: `"strip"`, `"strict"` or `"off"` (returns same router) |
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |

@@ -1269,6 +1269,16 @@ export interface DocsOptions {
    * @default true
    */
   documentValidationErrors?: boolean;
+  /**
+   * Responses every route can give (a 401 behind auth, a 500), documented
+   * once. A router's `responses()` and a route's own win for the statuses they
+   * document. Documentation only: these don't type or check bodies, a
+   * router's and a route's do.
+   *
+   * @example
+   * responses: { 500: { description: "Something went wrong", schema: ApiError } }
+   */
+  responses?: Record<number, ResponseDoc>;
 }
 
 interface RouteMetadata {
@@ -1776,6 +1786,25 @@ function scalarHtml(title: string, specUrl: string, cdnUrl: string): string {
 // with refs like #/$defs/Order; those move to components and their refs are
 // repointed. A schema that's named itself becomes a $ref too.
 
+// Documented responses, one layer over another (the docs', a router's, a
+// route's): the nearer layer wins, but a description alone keeps the schema
+// from below, so rewording a response doesn't lose its body
+function layerResponses(
+  under: Record<number, ResponseDoc> | undefined,
+  over: Record<number, ResponseDoc> | undefined,
+): Record<number, ResponseDoc> | undefined {
+  if (!under || !over) return over ?? under;
+  const layered: Record<number, ResponseDoc> = { ...under };
+  for (const [code, doc] of Object.entries(over)) {
+    const below = under[Number(code)];
+    layered[Number(code)] =
+      typeof doc === "string" && typeof below === "object" && below.schema
+        ? { description: doc, schema: below.schema }
+        : doc;
+  }
+  return layered;
+}
+
 const COMPONENT_REF = "#/components/schemas/";
 const LOCAL_REF = /^#\/(\$defs|definitions)\//;
 
@@ -2003,7 +2032,7 @@ async function buildOpenApiSpec(
       // for the success response (no staleness, reflects current code exactly).
       // Its status is the first success one documented in `responses` (a 201,
       // say), else the first seen in traffic, else 200.
-      const documented = Object.entries(route.responses ?? {});
+      const documented = Object.entries(layerResponses(options.responses, route.responses) ?? {});
       if (route.responseSchema) {
         const declared = await components.ref(route.responseSchema);
         if (declared && Object.keys(declared).length) {
@@ -2131,6 +2160,8 @@ export class TypedRouter<
   private defaultSecurity?: SecurityRequirement[] | undefined;
   // Read at request time, so it can be set after routes are registered
   private responseValidationMode: ResponseValidation = "off";
+  // Responses its routes can give, unless a route documents that status itself
+  private defaultResponses?: Record<number, ResponseDoc> | undefined;
 
   constructor() {
     this.router = express.Router();
@@ -2174,6 +2205,24 @@ export class TypedRouter<
    */
   responseValidation(mode: ResponseValidation): TypedRouter<Req, Locals> {
     this.responseValidationMode = mode;
+    return this;
+  }
+  /**
+   * Responses this router's routes can give, by status: typically what its
+   * middleware answers (a 401 without a key) or its error handler (a 500).
+   * Covers routers mounted under it too; a route's own `responses` win for
+   * the statuses they document. Their schemas count for responseValidation on
+   * this router's routes. They don't type res.json(): document a status on
+   * the route for that.
+   *
+   * @example
+   * const api = createTypedRouter().responses({
+   *   401: { description: "No valid API key", schema: ApiError },
+   *   500: { description: "Something went wrong", schema: ApiError },
+   * });
+   */
+  responses(responses: Record<number, ResponseDoc>): TypedRouter<Req, Locals> {
+    this.defaultResponses = responses;
     return this;
   }
   /**
@@ -2331,13 +2380,15 @@ export class TypedRouter<
       })),
     );
     const all = [...this.routes, ...mounted];
-    // This router's default security covers whatever doesn't set its own, so the
-    // nearest setting wins: the route's, then its router's, then a parent's.
-    const defaultSecurity = this.defaultSecurity;
-    if (!defaultSecurity) return all;
-    return all.map((meta) =>
-      meta.security === undefined ? { ...meta, security: defaultSecurity } : meta,
-    );
+    // This router's defaults cover whatever doesn't set its own, so the nearest
+    // setting wins: the route's, then its router's, then a parent's.
+    const { defaultSecurity, defaultResponses } = this;
+    if (!defaultSecurity && !defaultResponses) return all;
+    return all.map((meta) => ({
+      ...meta,
+      ...(defaultSecurity && meta.security === undefined ? { security: defaultSecurity } : {}),
+      ...(defaultResponses ? { responses: layerResponses(defaultResponses, meta.responses) } : {}),
+    }));
   }
 
   /**
@@ -3238,12 +3289,9 @@ export class TypedRouter<
           ),
         );
       }
-      const hasResponseSchemas =
-        options.responseSchema !== undefined ||
-        Object.values(options.responses ?? {}).some((doc) => typeof doc === "object" && doc.schema);
-      if (hasResponseSchemas) {
-        middlewares.push(this.createResponseValidationMiddleware(options, method, path));
-      }
+      // Cheap when the mode is "off": it reads it at request time, as the
+      // router's response schemas may be set after the route
+      middlewares.push(this.createResponseValidationMiddleware(options, method, path));
       middlewares.push(handler);
     } else {
       middlewares.push(optionsOrHandler);
@@ -3335,7 +3383,7 @@ export class TypedRouter<
     const route = `${method.toUpperCase()} ${path.toString()}`;
     const warned = new Set<number>();
     const schemaFor = (status: number): AnyStandardSchema | undefined => {
-      const doc = options.responses?.[status];
+      const doc = layerResponses(this.defaultResponses, options.responses)?.[status];
       if (typeof doc === "object" && doc.schema) return doc.schema;
       return status >= 200 && status < 300 ? options.responseSchema : undefined;
     };
@@ -3709,6 +3757,8 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
   hooks?: RouterHooks<Req>;
   /** The security this router's routes need in the docs; see {@link TypedRouter.security}. */
   security?: SecurityRequirement[];
+  /** Responses this router's routes can give; see {@link TypedRouter.responses}. */
+  responses?: Record<number, ResponseDoc>;
   /**
    * Whether bodies sent by this router's routes are checked against their
    * response schemas (see {@link ResponseValidation}); a route's own setting
@@ -3748,6 +3798,9 @@ export function createTypedRouterWithConfig<
   }
   if (config?.security) {
     router.security(config.security);
+  }
+  if (config?.responses) {
+    router.responses(config.responses);
   }
   if (config?.responseValidation) {
     router.responseValidation(config.responseValidation);
