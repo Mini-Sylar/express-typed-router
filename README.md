@@ -413,6 +413,7 @@ app.use(
 - query and body schemas (from `querySchema` / `bodySchema`)
 - **response schemas** — inferred from real traffic (see [Response schemas](#response-schemas-from-live-traffic) below)
 - tags and summaries — inferred from route paths, or set manually
+- authentication, per-status responses and shared `$ref` schemas, when you describe them (below)
 
 **Custom route metadata:**
 
@@ -455,6 +456,80 @@ router.post(
 This produces `/webhooks/events/{path}` and `/hooks/event` in the spec.
 For complex regular expressions, provide `pathExample` as a documentation
 stand-in; runtime matching is unaffected.
+
+### Authentication in the docs
+
+Describe how your API authenticates once, under a name, then say which routes
+need it. The docs UI gets an **Authorize** button (so "Try it out" sends your
+key or token), and client generators know what to send.
+
+```ts
+app.use(
+  "/docs",
+  api.docs({
+    title: "My API",
+    securitySchemes: {
+      apiKey: { type: "apiKey", in: "header", name: "x-api-key" },
+      bearer: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+    },
+    security: [{ bearer: [] }], // what every route needs, unless it says otherwise
+  }),
+);
+
+// A router's routes, typically what its auth middleware enforces
+const partners = createTypedRouter().useMiddleware(requireApiKey).security([{ apiKey: [] }]);
+
+// One route: [] is public; several entries are alternatives (a token *or* a key)
+router.post("/auth/sign-in", { security: [] }, signIn);
+router.get("/me", { security: [{ bearer: [] }, { apiKey: [] }] }, me);
+```
+
+The nearest setting wins: the route's, then its router's (or a parent
+router's), then the docs'. Any OpenAPI scheme works: `apiKey` (in a header,
+query or cookie), `http` (bearer or basic), `oauth2`, `openIdConnect` and
+`mutualTLS`. It's documentation only: enforcing it is still your
+middleware's job.
+
+### Documenting responses
+
+`responses` documents each status a route can answer with: a description, or a
+description and the schema of the body.
+
+```ts
+router.post(
+  "/orders",
+  {
+    bodySchema: CreateOrder,
+    responseSchema: Order,
+    responses: {
+      201: "The order, placed",
+      400: { description: "The body failed validation", schema: ApiError },
+      404: { description: "No such account", schema: ApiError },
+    },
+  },
+  placeOrder,
+);
+```
+
+`responseSchema` goes under the first success status listed (201 here),
+else 200. A schema in `responses` wins over one inferred from traffic;
+without one, an inferred schema for that status is kept under your
+description.
+
+### Shared schemas (`$ref`)
+
+A schema with a name is defined once, under `components.schemas`, and every
+route that uses it gets a `$ref` to it. Name it with Zod's metadata, or, for
+any validator, in the docs' `schemas`:
+
+```ts
+const Money = z.string().regex(/^\d+(\.\d{1,2})?$/).meta({ id: "Money" });
+const Order = z.object({ id: z.number(), amount: Money }).meta({ id: "Order" });
+
+api.docs({ schemas: { ApiError } }); // named by the schema object itself
+```
+
+Named schemas nested in others (`amount: Money`) become refs too.
 
 ### Response schemas from live traffic
 
@@ -840,6 +915,7 @@ Use a schema that actually parses the text:
 | `createTypedRouterWithConfig(config)`    | Create a router with an error handler and/or global config |
 | `router.useMiddleware(mw)`               | Add typed global middleware (returns new router) |
 | `router.onValidationFailure(hook)`       | Set the global validation failure hook (returns same router) |
+| `router.security(requirements)`          | The security this router's routes need in the docs (returns same router) |
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |

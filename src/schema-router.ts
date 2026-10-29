@@ -912,6 +912,28 @@ export interface RouteOptions<
   summary?: string;
   deprecated?: boolean;
   responseSchema?: AnyStandardSchema;
+  /**
+   * Other responses to document, and better descriptions for any, by status
+   * code: a description, or a description and the schema of the body. A
+   * schema here wins over one inferred from traffic; without one, an inferred
+   * schema for that status is kept under your description.
+   *
+   * @example
+   * responses: {
+   *   201: "The user, created",
+   *   400: "The body failed validation",
+   *   404: { description: "No such user", schema: ErrorSchema },
+   * }
+   */
+  responses?: Record<number, ResponseDoc>;
+  /**
+   * The security this route needs, by the names in
+   * {@link DocsOptions.securitySchemes}. Wins over its router's and the docs'
+   * defaults; `[]` marks it as needing none (say, a sign-in route under an
+   * authenticated router). Documentation only: enforcing it is still your
+   * middleware's job.
+   */
+  security?: SecurityRequirement[];
   /** Exclude this route from the generated OpenAPI spec entirely. */
   hidden?: boolean;
   /**
@@ -1006,6 +1028,8 @@ type DocMeta = Pick<
   | "description"
   | "deprecated"
   | "responseSchema"
+  | "responses"
+  | "security"
   | "hidden"
   | "pathExample"
 >;
@@ -1022,6 +1046,58 @@ export type HttpMethod =
   | "all";
 
 // ─── OpenAPI / Docs ──────────────────────────────────────────────────────────
+
+/** An OAuth 2 flow, as OpenAPI describes one. `scopes` maps each scope to what it allows. */
+export interface OAuthFlow {
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  refreshUrl?: string;
+  scopes: Record<string, string>;
+}
+
+/**
+ * One way an API authenticates, as OpenAPI describes it. Name each in
+ * {@link DocsOptions.securitySchemes}, then require it by that name with
+ * `security` (on the docs, a router, or a route).
+ *
+ * @example
+ * { type: "apiKey", in: "header", name: "x-api-key" }
+ * { type: "http", scheme: "bearer", bearerFormat: "JWT" }
+ * { type: "apiKey", in: "cookie", name: "session" }
+ */
+export type SecurityScheme = { description?: string } & (
+  | { type: "apiKey"; name: string; in: "header" | "query" | "cookie" }
+  | { type: "http"; scheme: "bearer" | "basic" | (string & {}); bearerFormat?: string }
+  | {
+      type: "oauth2";
+      flows: {
+        implicit?: OAuthFlow;
+        password?: OAuthFlow;
+        clientCredentials?: OAuthFlow;
+        authorizationCode?: OAuthFlow;
+      };
+    }
+  | { type: "openIdConnect"; openIdConnectUrl: string }
+  | { type: "mutualTLS" }
+);
+
+/**
+ * One way to satisfy a request's security: the schemes it needs together, by
+ * name, each with the OAuth scopes it needs (`[]` for none, and for every
+ * scheme that isn't OAuth). A list of these is alternatives: any one will do.
+ *
+ * @example
+ * [{ apiKey: [] }]                    // an API key
+ * [{ bearer: [] }, { apiKey: [] }]    // a bearer token, or an API key
+ * []                                  // nothing: a public route
+ */
+export type SecurityRequirement = Record<string, string[]>;
+
+/**
+ * A response to document, for {@link RouteOptions.responses}: its description,
+ * or its description and the schema of its body.
+ */
+export type ResponseDoc = string | { description: string; schema?: AnyStandardSchema };
 
 export interface DocsOptions {
   title?: string;
@@ -1072,6 +1148,36 @@ export interface DocsOptions {
    * @default true
    */
   sampleResponses?: boolean | "live";
+  /**
+   * How the API authenticates, each scheme under a name that `security`
+   * refers to. Becomes `components.securitySchemes`, which is what gives the
+   * docs UI its Authorize button and tells client generators what to send.
+   *
+   * @example
+   * securitySchemes: {
+   *   apiKey: { type: "apiKey", in: "header", name: "x-api-key" },
+   *   bearer: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+   * }
+   */
+  securitySchemes?: Record<string, SecurityScheme>;
+  /**
+   * The security every route needs unless its router or the route itself
+   * says otherwise (see {@link SecurityRequirement}).
+   *
+   * @example
+   * security: [{ apiKey: [] }]
+   */
+  security?: SecurityRequirement[];
+  /**
+   * Schemas to name, for any validator: each is defined once under that name
+   * in `components.schemas`, and wherever a route uses the same schema it's a
+   * `$ref` to it. (Zod schemas can name themselves instead, with
+   * `.meta({ id: "Order" })`.)
+   *
+   * @example
+   * schemas: { Order: OrderSchema, Error: ErrorSchema }
+   */
+  schemas?: Record<string, AnyStandardSchema>;
 }
 
 interface RouteMetadata {
@@ -1087,6 +1193,8 @@ interface RouteMetadata {
   summary?: string | undefined;
   deprecated?: boolean | undefined;
   responseSchema?: AnyStandardSchema | undefined;
+  responses?: Record<number, ResponseDoc> | undefined;
+  security?: SecurityRequirement[] | undefined;
   hidden?: boolean | undefined;
   // Per status code: a JSON Schema inferred (and merged) from observed
   // responses, plus an optional real example (only in "live" mode).
@@ -1567,11 +1675,131 @@ function scalarHtml(title: string, specUrl: string, cdnUrl: string): string {
 </html>`;
 }
 
+// ─── $ref components ─────────────────────────────────────────────────────────
+// A named schema (Zod: .meta({ id: "Order" })) is defined once, in
+// components.schemas, and referenced everywhere it's used. Validators put the
+// named schemas nested in another under $defs (or the older `definitions`),
+// with refs like #/$defs/Order; those move to components and their refs are
+// repointed. A schema that's named itself becomes a $ref too.
+
+const COMPONENT_REF = "#/components/schemas/";
+const LOCAL_REF = /^#\/(\$defs|definitions)\//;
+
+// The name a schema was given, if any: in the docs' `schemas`, else Zod's
+// metadata id, else a plain $id
+function schemaName(
+  schema: AnyStandardSchema,
+  json: Record<string, any>,
+  named: WeakMap<object, string>,
+): string | undefined {
+  const given = named.get(schema as object);
+  if (given) return given;
+  if ((schema as any)["~standard"]?.vendor === "zod") {
+    try {
+      const id = (schema as any).meta?.()?.id;
+      if (typeof id === "string" && id) return id;
+    } catch {}
+  }
+  const $id = json.$id;
+  return typeof $id === "string" && /^[A-Za-z0-9._-]+$/.test($id) ? $id : undefined;
+}
+
+class SchemaComponents {
+  readonly schemas: Record<string, Record<string, any>> = Object.create(null);
+  // The docs' `schemas`, by the schema object itself
+  private readonly named = new WeakMap<object, string>();
+
+  constructor(named: Record<string, AnyStandardSchema> = {}) {
+    for (const [name, schema] of Object.entries(named)) this.named.set(schema as object, name);
+  }
+
+  /** Defines the docs' named schemas, used by a route or not */
+  async addNamed(named: Record<string, AnyStandardSchema> = {}): Promise<void> {
+    for (const schema of Object.values(named)) await this.ref(schema);
+  }
+
+  /** The schema as it goes in a request body or response: a $ref when it's named */
+  async ref(schema: AnyStandardSchema): Promise<Record<string, any>> {
+    const json = await trySchemaToJsonSchema(schema);
+    const name = schemaName(schema, json, this.named);
+    const inline = this.hoist(json, name);
+    if (!name || !Object.keys(inline).length) return inline;
+    this.add(name, inline);
+    return { $ref: COMPONENT_REF + name };
+  }
+
+  /** The schema written out, for reading its properties (path and query parameters) */
+  async inline(schema: AnyStandardSchema): Promise<Record<string, any>> {
+    const json = await trySchemaToJsonSchema(schema);
+    return this.hoist(json, schemaName(schema, json, this.named));
+  }
+
+  // Moves the schema's $defs into components and repoints refs to them. The
+  // converted schema is cached (and shared), so this works on a copy.
+  private hoist(json: Record<string, any>, name: string | undefined): Record<string, any> {
+    const { $schema: _, $id: __, $defs, definitions, ...rest } = structuredClone(json);
+    for (const [defName, def] of Object.entries({ ...definitions, ...$defs })) {
+      this.add(defName, this.hoist(def as Record<string, any>, defName));
+    }
+    return repointRefs(rest, name) as Record<string, any>;
+  }
+
+  private add(name: string, schema: Record<string, any>): void {
+    const existing = this.schemas[name];
+    if (!existing) {
+      this.schemas[name] = schema;
+    } else if (JSON.stringify(existing) !== JSON.stringify(schema)) {
+      console.warn(
+        `[express-typed-router] Two different schemas are both named "${name}"; the docs keep the first. Give each its own name.`,
+      );
+    }
+  }
+}
+
+// #/$defs/X becomes #/components/schemas/X; "#" (a schema referring to itself,
+// when it's recursive) becomes its own component when it has a name
+function repointRefs(node: unknown, selfName: string | undefined): unknown {
+  if (Array.isArray(node)) return node.map((item) => repointRefs(item, selfName));
+  if (!node || typeof node !== "object") return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "$ref" && typeof value === "string") {
+      if (LOCAL_REF.test(value)) out[key] = value.replace(LOCAL_REF, COMPONENT_REF);
+      else if (value === "#" && selfName) out[key] = COMPONENT_REF + selfName;
+      else out[key] = value;
+    } else {
+      out[key] = repointRefs(value, selfName);
+    }
+  }
+  return out;
+}
+
+// Every scheme a requirement names should be one the docs define
+function warnAboutUndefinedSchemes(
+  requirements: SecurityRequirement[] | undefined,
+  defined: Record<string, SecurityScheme> | undefined,
+  warned: Set<string>,
+): void {
+  for (const requirement of requirements ?? []) {
+    for (const scheme of Object.keys(requirement)) {
+      if (defined?.[scheme] || warned.has(scheme)) continue;
+      warned.add(scheme);
+      console.warn(
+        `[express-typed-router] "${scheme}" is required as security but isn't in the docs' securitySchemes, so the docs can't describe it.`,
+      );
+    }
+  }
+}
+
 async function buildOpenApiSpec(
   routes: RouteMetadata[],
   options: DocsOptions,
 ): Promise<Record<string, any>> {
   const paths: Record<string, any> = Object.create(null);
+  const components = new SchemaComponents(options.schemas);
+  await components.addNamed(options.schemas);
+  const warnedSchemes = new Set<string>();
+  warnAboutUndefinedSchemes(options.security, options.securitySchemes, warnedSchemes);
 
   for (const route of routes) {
     if (route.method === "all" || route.hidden) continue;
@@ -1582,7 +1810,7 @@ async function buildOpenApiSpec(
 
       let parameters: any[];
       if (route.paramsSchema) {
-        const ps = await trySchemaToJsonSchema(route.paramsSchema);
+        const ps = await components.inline(route.paramsSchema);
         const props: Record<string, any> = ps.properties ?? {};
         const required: string[] = ps.required ?? [];
         parameters = Object.entries(props).map(([name, propSchema]) => ({
@@ -1601,7 +1829,7 @@ async function buildOpenApiSpec(
       }
 
       if (route.querySchema) {
-        const qs = await trySchemaToJsonSchema(route.querySchema);
+        const qs = await components.inline(route.querySchema);
         const props: Record<string, any> = qs.properties ?? {};
         const required: string[] = qs.required ?? [];
         for (const [name, propSchema] of Object.entries(props)) {
@@ -1622,9 +1850,13 @@ async function buildOpenApiSpec(
 
       if (route.description) operation.description = route.description;
       if (route.deprecated) operation.deprecated = true;
+      if (route.security) {
+        operation.security = route.security;
+        warnAboutUndefinedSchemes(route.security, options.securitySchemes, warnedSchemes);
+      }
 
       if (route.bodySchema) {
-        const bs = await trySchemaToJsonSchema(route.bodySchema);
+        const bs = await components.ref(route.bodySchema);
         operation.requestBody = {
           required: true,
           content: { "application/json": { schema: bs } },
@@ -1643,26 +1875,41 @@ async function buildOpenApiSpec(
       }
       // A declared responseSchema is the source of truth — it wins over inference
       // for the success response (no staleness, reflects current code exactly).
+      // Its status is the first success one documented in `responses` (a 201,
+      // say), else the first seen in traffic, else 200.
+      const documented = Object.entries(route.responses ?? {});
       if (route.responseSchema) {
-        const declared = await trySchemaToJsonSchema(route.responseSchema);
+        const declared = await components.ref(route.responseSchema);
         if (declared && Object.keys(declared).length) {
-          let successStatus = "200";
-          for (const code of route.responseSamples.keys()) {
-            if (code >= 200 && code < 300) {
-              successStatus = String(code);
-              break;
-            }
-          }
-          responses[successStatus] = {
+          const isSuccess = (code: number) => code >= 200 && code < 300;
+          const successStatus =
+            documented.map(([code]) => Number(code)).find(isSuccess) ??
+            [...route.responseSamples.keys()].find(isSuccess) ??
+            200;
+          responses[String(successStatus)] = {
             description: "Success",
             content: { "application/json": { schema: declared } },
           };
         }
       }
+      // Documented responses: their descriptions win, and so do their schemas;
+      // without one, whatever schema the status already has stays
+      for (const [code, doc] of documented) {
+        const { description, schema } = typeof doc === "string" ? { description: doc, schema: undefined } : doc;
+        const response: Record<string, any> = { ...responses[code], description };
+        if (schema) {
+          const json = await components.ref(schema);
+          if (Object.keys(json).length) response.content = { "application/json": { schema: json } };
+        }
+        responses[code] = response;
+      }
       if (Object.keys(responses).length === 0) {
         responses["200"] = { description: "Success" };
       }
-      operation.responses = responses;
+      // In status order, however they were added
+      operation.responses = Object.fromEntries(
+        Object.entries(responses).sort(([a], [b]) => Number(a) - Number(b)),
+      );
 
       paths[openApiPath][route.method] = operation;
     }
@@ -1676,7 +1923,16 @@ async function buildOpenApiSpec(
       ...(options.description ? { description: options.description } : {}),
     },
     ...(options.servers ? { servers: options.servers } : {}),
+    ...(options.security ? { security: options.security } : {}),
     paths,
+    ...(Object.keys(components.schemas).length || options.securitySchemes
+      ? {
+          components: {
+            ...(Object.keys(components.schemas).length ? { schemas: components.schemas } : {}),
+            ...(options.securitySchemes ? { securitySchemes: options.securitySchemes } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -1734,6 +1990,9 @@ export class TypedRouter<
   // sub-routers mounted with .mount()/.use(). Pass the same hook to each
   // router's config if you want it shared across all of them.
   private globalValidationFailureHook?: ValidationFailureHook<Req> | undefined;
+  // The security its routes need in the docs, unless a route says otherwise.
+  // Set via .security() or createTypedRouterWithConfig({ security }).
+  private defaultSecurity?: SecurityRequirement[] | undefined;
 
   constructor() {
     this.router = express.Router();
@@ -1753,6 +2012,21 @@ export class TypedRouter<
    */
   onValidationFailure(hook: ValidationFailureHook<Req>): TypedRouter<Req, Locals> {
     this.globalValidationFailureHook = hook;
+    return this;
+  }
+  /**
+   * The security this router's routes need in the docs, by the names in
+   * {@link DocsOptions.securitySchemes}: typically what its auth middleware
+   * enforces. Covers routes on routers mounted under it too, unless they set
+   * their own; a route's own `security` wins over both. Documentation only.
+   *
+   * @example
+   * const partnerApi = createTypedRouter()
+   *   .useMiddleware(requireApiKey)
+   *   .security([{ apiKey: [] }]);
+   */
+  security(requirements: SecurityRequirement[]): TypedRouter<Req, Locals> {
+    this.defaultSecurity = requirements;
     return this;
   }
   /**
@@ -1909,7 +2183,14 @@ export class TypedRouter<
             }),
       })),
     );
-    return [...this.routes, ...mounted];
+    const all = [...this.routes, ...mounted];
+    // This router's default security covers whatever doesn't set its own, so the
+    // nearest setting wins: the route's, then its router's, then a parent's.
+    const defaultSecurity = this.defaultSecurity;
+    if (!defaultSecurity) return all;
+    return all.map((meta) =>
+      meta.security === undefined ? { ...meta, security: defaultSecurity } : meta,
+    );
   }
 
   /**
@@ -2637,6 +2918,8 @@ export class TypedRouter<
       meta.summary = options.summary;
       meta.deprecated = options.deprecated;
       meta.responseSchema = options.responseSchema;
+      meta.responses = options.responses;
+      meta.security = options.security;
       meta.hidden = options.hidden;
       meta.pathExample = options.pathExample;
 
@@ -3097,6 +3380,8 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
     next: NextFunction,
   ) => void;
   hooks?: RouterHooks<Req>;
+  /** The security this router's routes need in the docs; see {@link TypedRouter.security}. */
+  security?: SecurityRequirement[];
 }
 
 /**
@@ -3126,6 +3411,9 @@ export function createTypedRouterWithConfig<
   }
   if (config?.hooks?.onValidationFailure) {
     router.onValidationFailure(config.hooks.onValidationFailure);
+  }
+  if (config?.security) {
+    router.security(config.security);
   }
   return router;
 }
