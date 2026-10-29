@@ -325,6 +325,9 @@ const requireAuth: TypedMiddleware<{ userId: string; email: string }> = (
 };
 ```
 
+As in Express, what a middleware returns is ignored, so an existing one that
+ends with `return res.status(401).json(...)` can be typed as it is.
+
 **Global middleware** — applied to all routes on the router:
 
 ```ts
@@ -662,6 +665,21 @@ api.docs({ schemas: { ApiError } }); // named by the schema object itself
 
 Named schemas nested in others (`amount: Money`) become refs too.
 
+### Requests and responses
+
+A request is documented as its schema accepts it, and a response as its schema
+produces it. They can differ: a field with a `.default()` is optional going in
+and always there coming out. A named schema used both ways that differs gets
+two components, `User` for responses and `UserInput` for requests.
+
+For Zod, what JSON Schema can't express doesn't drop the whole schema:
+
+- a `z.date()` is a `date-time` string, as it's sent in JSON
+- a `.transform()` is described by what it takes, as its output can't be known
+  (so `z.number().transform((n) => n as UserId)` is a number)
+- anything else is left open (`{}`), and a schema that can't be converted at
+  all is left out, with a warning
+
 ### Response schemas from live traffic
 
 You don't have to declare what your routes return. The library **observes real responses** (`res.json` / `res.send`), **infers a JSON Schema** from them, and **merges across samples** — so it learns field types, which fields are nullable, and which are optional. This drives both the docs UI and `openapi-typescript` (real response types instead of `unknown`).
@@ -758,6 +776,8 @@ All validators work for **request validation**. For **OpenAPI schema generation*
 | Decoders / ts.data.json / unhoax | ✅         | ⚠️          | not supported — no schema introspection           |
 
 > **⚠️ Partial docs** means routes still appear in the spec with paths, methods, and inferred response schemas — only the request body/query field shapes are missing.
+
+Any other library that implements [Standard JSON Schema](https://standardschema.dev) (`~standard.jsonSchema`) is documented through it, with no extra install.
 
 ---
 
