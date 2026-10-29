@@ -652,7 +652,12 @@ export type SchemaRequest<
   MiddlewareProps extends Record<string, any> = {},
   ParamsSchema extends SchemaLike | undefined = undefined,
   ParamsOverride extends Record<string, any> | undefined = undefined,
-> = Omit<Request, "params" | "query" | "body"> & {
+  HeadersSchema extends SchemaLike | undefined = undefined,
+> = Omit<Request, "params" | "query" | "body" | "headers"> & {
+  // The headers the schema validated (by their lowercase names), beside the rest
+  headers: HeadersSchema extends undefined
+    ? Request["headers"]
+    : Request["headers"] & InferSchemaOutput<HeadersSchema>;
   params: ParamsOverride extends undefined
     ? ParamsSchema extends undefined
       ? ExtractRouteParams<Path>
@@ -675,6 +680,7 @@ export type SchemaRouteHandler<
   ParamsOverride extends Record<string, any> | undefined = undefined,
   ResponseSchema extends AnyStandardSchema | undefined = undefined,
   Responses extends Record<number, ResponseDoc> | undefined = undefined,
+  HeadersSchema extends SchemaLike | undefined = undefined,
 > = (
   req: SchemaRequest<
     Path,
@@ -682,7 +688,8 @@ export type SchemaRouteHandler<
     QuerySchema,
     MiddlewareProps,
     ParamsSchema,
-    ParamsOverride
+    ParamsOverride,
+    HeadersSchema
   >,
   // Plain Express when the route documents no response schemas, so nothing
   // changes for it
@@ -764,7 +771,7 @@ export type TypedResponse<
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
 /** Which validated part of the request failed. */
-export type ValidationFailureSource = "body" | "query" | "params";
+export type ValidationFailureSource = "body" | "query" | "params" | "headers";
 
 /**
  * Passed to a validation failure hook when bodySchema/querySchema/paramsSchema
@@ -839,6 +846,14 @@ export type RouteValidationFailureInfo<
       source: "params";
       error: string;
       details: SchemaValidationDetails<ParamsSchema>;
+      method: HttpMethod;
+      path: string;
+      req: Request & MiddlewareProps;
+    }
+  | {
+      source: "headers";
+      error: string;
+      details: readonly StandardSchemaV1.Issue[];
       method: HttpMethod;
       path: string;
       req: Request & MiddlewareProps;
@@ -964,6 +979,17 @@ export interface RouteOptions<
    * string-arrival caveat as `querySchema` applies; see its docs above.
    */
   paramsSchema?: ParamsSchema;
+  /**
+   * Validates, types and documents request headers. Name them in lowercase,
+   * as Node gives them (`"idempotency-key"`, not `"Idempotency-Key"`). The
+   * parsed values are merged over `req.headers`, so the others stay. A
+   * failure answers the default 400, and reaches onValidationFailure with
+   * `source: "headers"`.
+   *
+   * @example
+   * headersSchema: z.object({ "idempotency-key": z.uuid() })
+   */
+  headersSchema?: SchemaLike;
   /** hooks.onValidationFailure runs in addition to the router's global hook (set via createTypedRouterWithConfig or router.onValidationFailure()), if both are set. */
   hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
   middleware?: TypedMiddleware<any, any>[];
@@ -1054,7 +1080,14 @@ type NormalizeHandlerMiddleware<Middleware> =
 
 type InferHandlerOption<
   Options extends InferSchemaHandlerOptions,
-  Key extends "bodySchema" | "querySchema" | "paramsSchema" | "middleware" | "responseSchema" | "responses",
+  Key extends
+    | "bodySchema"
+    | "querySchema"
+    | "paramsSchema"
+    | "headersSchema"
+    | "middleware"
+    | "responseSchema"
+    | "responses",
 > = Key extends keyof Options ? Options[Key] : undefined;
 
 /**
@@ -1084,7 +1117,8 @@ export type InferSchemaHandler<Options extends InferSchemaHandlerOptions = {}> =
     InferHandlerOption<Options, "paramsSchema">,
     Record<string, string | string[] | undefined>,
     InferHandlerOption<Options, "responseSchema">,
-    InferHandlerOption<Options, "responses">
+    InferHandlerOption<Options, "responses">,
+    InferHandlerOption<Options, "headersSchema">
   >;
 
 type RouteHandlerFromOptions<
@@ -1097,6 +1131,7 @@ type RouteHandlerFromOptions<
   M extends TypedMiddleware<any, any>[],
   ResponseSchema extends AnyStandardSchema | undefined = undefined,
   Responses extends Record<number, ResponseDoc> | undefined = undefined,
+  HeadersSchema extends SchemaLike | undefined = undefined,
 > = SchemaRouteHandler<
   Path,
   NoInfer<BodySchema>,
@@ -1106,7 +1141,8 @@ type RouteHandlerFromOptions<
   NoInfer<ParamsSchema>,
   undefined,
   NoInfer<ResponseSchema>,
-  NoInfer<Responses>
+  NoInfer<Responses>,
+  NoInfer<HeadersSchema>
 >;
 
 // Doc-only fields extracted from RouteOptions — merged into typed middleware
@@ -1329,6 +1365,7 @@ interface RouteMetadata {
   bodySchema?: AnyStandardSchema | undefined;
   querySchema?: AnyStandardSchema | undefined;
   paramsSchema?: AnyStandardSchema | undefined;
+  headersSchema?: AnyStandardSchema | undefined;
   tags?: string[] | undefined;
   description?: string | undefined;
   summary?: string | undefined;
@@ -2074,6 +2111,21 @@ async function buildOpenApiSpec(
       }
       operationIds.add(operationId);
 
+      if (route.headersSchema) {
+        const hs = await components.inline(route.headersSchema);
+        const required: string[] = hs.required ?? [];
+        for (const [name, propSchema] of Object.entries<Record<string, any>>(hs.properties ?? {})) {
+          const { description, ...schema } = propSchema;
+          parameters.push({
+            name,
+            in: "header",
+            required: required.includes(name),
+            ...(description ? { description } : {}),
+            schema,
+          });
+        }
+      }
+
       const operation: Record<string, any> = {
         operationId,
         summary: route.summary ?? autoSummary(route.method, docPath),
@@ -2690,6 +2742,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2697,6 +2750,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2712,7 +2766,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
@@ -2727,6 +2782,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2734,6 +2790,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2749,7 +2806,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   // Implementation
@@ -2771,6 +2829,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2778,6 +2837,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2793,7 +2853,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   post(
@@ -2806,6 +2867,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2813,6 +2875,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2828,7 +2891,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   post(
@@ -2851,6 +2915,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2858,6 +2923,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2873,7 +2939,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   put(
@@ -2886,6 +2953,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2893,6 +2961,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2908,7 +2977,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   put(
@@ -2931,6 +3001,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2938,6 +3009,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2953,7 +3025,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   patch(
@@ -2966,6 +3039,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2973,6 +3047,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -2988,7 +3063,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   patch(
@@ -3010,12 +3086,14 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3031,7 +3109,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   delete(
@@ -3043,12 +3122,14 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3064,7 +3145,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   delete(
@@ -3086,12 +3168,14 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3107,7 +3191,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   options(
@@ -3119,12 +3204,14 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3140,7 +3227,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   options(
@@ -3162,12 +3250,14 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3183,7 +3273,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   head(
@@ -3195,12 +3286,14 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3216,7 +3309,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   head(
@@ -3239,6 +3333,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -3246,6 +3341,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3261,7 +3357,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   all(
@@ -3274,6 +3371,7 @@ export class TypedRouter<
     ParamsSchema extends SchemaLike | undefined = undefined,
     ResponseSchema extends AnyStandardSchema | undefined = undefined,
     Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -3281,6 +3379,7 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
       responseValidation?: ResponseValidation;
@@ -3296,7 +3395,8 @@ export class TypedRouter<
       Locals,
       M,
       ResponseSchema,
-      Responses
+      Responses,
+      HeadersSchema
     >,
   ): TypedRouter<Req, Locals>;
   all(
@@ -3323,6 +3423,7 @@ export class TypedRouter<
       meta.bodySchema = options.bodySchema as AnyStandardSchema | undefined;
       meta.querySchema = options.querySchema as AnyStandardSchema | undefined;
       meta.paramsSchema = options.paramsSchema as AnyStandardSchema | undefined;
+      meta.headersSchema = options.headersSchema as AnyStandardSchema | undefined;
       meta.tags = options.tags;
       meta.description = options.description;
       meta.summary = options.summary;
@@ -3390,6 +3491,11 @@ export class TypedRouter<
             onValidationFailure,
             onParamsValidationFailure,
           ),
+        );
+      }
+      if (options.headersSchema) {
+        middlewares.push(
+          this.createHeadersValidationMiddleware(options.headersSchema, method, path, options.pathExample, onValidationFailure),
         );
       }
       // Cheap when the mode is "off": it reads it at request time, as the
@@ -3475,6 +3581,34 @@ export class TypedRouter<
 
     return this;
   }
+  // Validates req.headers, merging the parsed values over it: a Zod-style
+  // object drops keys it doesn't declare, and the rest must stay
+  private createHeadersValidationMiddleware(
+    schema: any,
+    method: HttpMethod,
+    path: string | RegExp,
+    pathExample: string | string[] | undefined,
+    onValidationFailure: ValidationFailureHook | undefined,
+  ) {
+    return async (req: Request, res: Response, next: NextFunction) => {
+      const fail = (details: any[]) => {
+        this.notifyValidationFailure("headers", "Validation failed", details, method, resolveDocPath({ path, pathExample }), req, onValidationFailure);
+        defaultValidationHandler({ res, details });
+      };
+      try {
+        const result = safeParseSchema(schema, req.headers) as any;
+        const resolved = result && typeof result.then === "function" ? await result : result;
+        if (resolved && "issues" in resolved && resolved.issues) return fail(resolved.issues);
+        const parsed = resolved && "value" in resolved ? resolved.value : resolved;
+        if (parsed && typeof parsed === "object") Object.assign(req.headers, parsed);
+        next();
+      } catch (error) {
+        if (isSchemaError(error)) fail((error as any).errors || (error as any).issues);
+        else next(error);
+      }
+    };
+  }
+
   // Runs each JSON body through the schema for its status (see
   // ResponseValidation). Wraps res.json, which res.send(object) also goes
   // through in Express, after the sampler, so samples see what was sent.

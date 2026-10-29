@@ -543,6 +543,25 @@ off with `documentValidationErrors: false`. A route whose
 `onBodyValidationFailure` (or query/params) hook can send something else gets
 the description only.
 
+### Request headers
+
+`headersSchema` validates, types and documents headers, like `bodySchema`
+does the body. Name them in lowercase, as Node gives them:
+
+```ts
+router.post(
+  "/payments",
+  { headersSchema: z.object({ "idempotency-key": z.uuid().describe("Makes retries safe") }) },
+  (req, res) => {
+    req.headers["idempotency-key"]; // string, validated
+  },
+);
+```
+
+The parsed values are merged over `req.headers`, so other headers stay. A
+missing or invalid one answers the default 400, and reaches
+`onValidationFailure` with `source: "headers"`.
+
 ### File uploads and other media types
 
 For a route that takes uploads, `files` documents its file fields; the body
