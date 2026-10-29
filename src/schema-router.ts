@@ -983,6 +983,60 @@ export interface RouteHooks<
   onParamsValidationFailure?: SchemaValidationFailureHook<ParamsSchema, MiddlewareProps>;
 }
 
+/**
+ * How a route appears in the docs, for {@link RouteOptions.docs}. None of it
+ * changes what the route does.
+ */
+export interface RouteDocs {
+  /** The sections it's listed under; the first segment of its path when not set */
+  tags?: string[];
+  /** A one-line title; generated from the method and path when not set */
+  summary?: string;
+  /** What it does, in as much detail as a caller needs (Markdown) */
+  description?: string;
+  /** Marks it as on its way out */
+  deprecated?: boolean;
+  /**
+   * The operation's id, which client generators name its method after.
+   * Generated from the method and path when not set (GET /orders/:id is
+   * getOrdersById); set one for a friendlier name, e.g. "getOrder". It must
+   * be unique across the API.
+   */
+  operationId?: string;
+  /**
+   * The security it needs, by the names in {@link DocsOptions.securitySchemes}.
+   * Wins over its router's and the docs' defaults; `[]` marks it as needing
+   * none (say, a sign-in route under an authenticated router). Enforcing it
+   * is still your middleware's job.
+   */
+  security?: SecurityRequirement[];
+  /**
+   * The files a multipart body carries, by field name, for routes that take
+   * uploads (through multer, say). The body is documented as
+   * multipart/form-data: these as files, `bodySchema`'s fields beside them.
+   * The upload middleware still does the uploading.
+   *
+   * @example
+   * files: { idImage: { required: true }, photos: { multiple: true, description: "Up to 5" } }
+   */
+  files?: Record<string, FileField>;
+  /**
+   * The request body's media type when it isn't JSON, e.g.
+   * "application/x-www-form-urlencoded". `files` implies multipart/form-data.
+   */
+  bodyContentType?: string;
+  /** Leaves it out of the docs altogether */
+  hidden?: boolean;
+  /**
+   * Stand-in path(s) for the docs. Required for a `RegExp` route (defaults
+   * to `regex.toString()` otherwise); optional for a string route, to
+   * override an ambiguous auto-converted path. An array documents the route
+   * under several paths at once (e.g. a wildcard commonly hit a few ways), one
+   * entry per element. Doesn't affect `req.params`.
+   */
+  pathExample?: string | string[];
+}
+
 export interface RouteOptions<
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
@@ -1017,67 +1071,41 @@ export interface RouteOptions<
   /** hooks.onValidationFailure runs in addition to the router's global hook (set via createTypedRouterWithConfig or router.onValidationFailure()), if both are set. */
   hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
   middleware?: TypedMiddleware<any, any>[];
-  tags?: string[];
-  description?: string;
-  summary?: string;
-  deprecated?: boolean;
+  /**
+   * The body a success response sends: documents it, types `res.json()`, and
+   * with `responseValidation` on, is what's sent. For other statuses, or a
+   * success status other than 200, see `responses`.
+   */
   responseSchema?: AnyStandardSchema;
   /**
-   * Other responses to document, and better descriptions for any, by status
-   * code: a description, or a description and the schema of the body. A
-   * schema here wins over one inferred from traffic; without one, an inferred
-   * schema for that status is kept under your description.
+   * The responses this route can give, by status code: a description, or a
+   * description and the schema of the body (which types `res.status(code).json()`
+   * and is used by `responseValidation`). A schema here wins over one
+   * inferred from traffic; without one, an inferred schema for that status is
+   * kept under your description.
    *
    * @example
    * responses: {
    *   201: "The user, created",
-   *   400: "The body failed validation",
    *   404: { description: "No such user", schema: ErrorSchema },
    * }
    */
   responses?: Record<number, ResponseDoc>;
   /** Whether bodies sent are checked against their schema; wins over the router's. See {@link ResponseValidation}. */
   responseValidation?: ResponseValidation;
-  /**
-   * The request body's media type in the docs, when it isn't JSON, e.g.
-   * "application/x-www-form-urlencoded". `files` implies multipart/form-data.
-   */
-  bodyContentType?: string;
-  /**
-   * The files a multipart body carries, by field name, for routes that take
-   * uploads (through multer, say). The body is documented as
-   * multipart/form-data: these as files, `bodySchema`'s fields beside them.
-   * Documentation only: the upload middleware still does the work.
-   *
-   * @example
-   * files: { idImage: { required: true }, photos: { multiple: true, description: "Up to 5" } }
-   */
-  files?: Record<string, FileField>;
-  /**
-   * The operation's id, which client generators name its method after.
-   * Generated from the method and path when not set (GET /orders/:id is
-   * getOrdersById); set one for a friendlier name, e.g. "getOrder". It must
-   * be unique across the API.
-   */
-  operationId?: string;
-  /**
-   * The security this route needs, by the names in
-   * {@link DocsOptions.securitySchemes}. Wins over its router's and the docs'
-   * defaults; `[]` marks it as needing none (say, a sign-in route under an
-   * authenticated router). Documentation only: enforcing it is still your
-   * middleware's job.
-   */
-  security?: SecurityRequirement[];
-  /** Exclude this route from the generated OpenAPI spec entirely. */
+  /** How the route appears in the docs: its tags, summary, security and so on. See {@link RouteDocs}. */
+  docs?: RouteDocs;
+  /** @deprecated Use `docs.tags`. */
+  tags?: string[];
+  /** @deprecated Use `docs.summary`. */
+  summary?: string;
+  /** @deprecated Use `docs.description`. */
+  description?: string;
+  /** @deprecated Use `docs.deprecated`. */
+  deprecated?: boolean;
+  /** @deprecated Use `docs.hidden`. */
   hidden?: boolean;
-  /**
-   * Stand-in path(s) for the OpenAPI doc. Required for a `RegExp` route
-   * (defaults to `regex.toString()` otherwise); optional for a string
-   * route, to override an ambiguous auto-converted path. An array documents
-   * the route under multiple paths at once (e.g. a wildcard that's commonly
-   * hit a few different ways), one spec entry per element. Doc-only,
-   * doesn't affect `req.params`.
-   */
+  /** @deprecated Use `docs.pathExample`. */
   pathExample?: string | string[];
 }
 
@@ -1174,16 +1202,7 @@ type RouteHandlerFromOptions<
 // without TypeScript's excess-property checking dropping the typed overload.
 type DocMeta = Pick<
   RouteOptions,
-  | "tags"
-  | "summary"
-  | "description"
-  | "deprecated"
-  | "security"
-  | "operationId"
-  | "bodyContentType"
-  | "files"
-  | "hidden"
-  | "pathExample"
+  "docs" | "tags" | "summary" | "description" | "deprecated" | "hidden" | "pathExample"
 >;
 
 // HTTP methods
@@ -3472,23 +3491,25 @@ export class TypedRouter<
       meta.querySchema = options.querySchema as AnyStandardSchema | undefined;
       meta.paramsSchema = options.paramsSchema as AnyStandardSchema | undefined;
       meta.headersSchema = options.headersSchema as AnyStandardSchema | undefined;
-      meta.tags = options.tags;
-      meta.description = options.description;
-      meta.summary = options.summary;
-      meta.deprecated = options.deprecated;
+      // `docs` wins over the deprecated flat fields
+      const docs = options.docs ?? {};
+      meta.tags = docs.tags ?? options.tags;
+      meta.description = docs.description ?? options.description;
+      meta.summary = docs.summary ?? options.summary;
+      meta.deprecated = docs.deprecated ?? options.deprecated;
       meta.responseSchema = options.responseSchema;
       meta.responses = options.responses;
-      meta.security = options.security;
-      meta.operationId = options.operationId;
-      meta.bodyContentType = options.bodyContentType;
-      meta.files = options.files;
+      meta.security = docs.security;
+      meta.operationId = docs.operationId;
+      meta.bodyContentType = docs.bodyContentType;
+      meta.files = docs.files;
       meta.customValidationResponse = Boolean(
         options.hooks?.onBodyValidationFailure ||
           options.hooks?.onQueryValidationFailure ||
           options.hooks?.onParamsValidationFailure,
       );
-      meta.hidden = options.hidden;
-      meta.pathExample = options.pathExample;
+      meta.hidden = docs.hidden ?? options.hidden;
+      meta.pathExample = docs.pathExample ?? options.pathExample;
 
       if (options.middleware) {
         middlewares.push(...options.middleware);
@@ -3511,7 +3532,7 @@ export class TypedRouter<
             options.bodySchema,
             method,
             path,
-            options.pathExample,
+            meta.pathExample,
             onValidationFailure,
             onBodyValidationFailure,
           ),
@@ -3523,7 +3544,7 @@ export class TypedRouter<
             options.querySchema,
             method,
             path,
-            options.pathExample,
+            meta.pathExample,
             onValidationFailure,
             onQueryValidationFailure,
           ),
@@ -3535,7 +3556,7 @@ export class TypedRouter<
             options.paramsSchema,
             method,
             path,
-            options.pathExample,
+            meta.pathExample,
             onValidationFailure,
             onParamsValidationFailure,
           ),
@@ -3543,7 +3564,7 @@ export class TypedRouter<
       }
       if (options.headersSchema) {
         middlewares.push(
-          this.createHeadersValidationMiddleware(options.headersSchema, method, path, options.pathExample, onValidationFailure),
+          this.createHeadersValidationMiddleware(options.headersSchema, method, path, meta.pathExample, onValidationFailure),
         );
       }
       // Cheap when the mode is "off": it reads it at request time, as the

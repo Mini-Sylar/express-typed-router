@@ -413,24 +413,34 @@ app.use(
 - query and body schemas (from `querySchema` / `bodySchema`)
 - **response schemas** — inferred from real traffic (see [Response schemas](#response-schemas-from-live-traffic) below)
 - tags and summaries — inferred from route paths, or set manually
-- an `operationId` for each route, from its method and path (`GET /orders/:id` is `getOrdersById`), which client generators name their methods after; set `operationId` on a route for a friendlier one
+- an `operationId` for each route, from its method and path (`GET /orders/:id` is `getOrdersById`), which client generators name their methods after; set `docs.operationId` on a route for a friendlier one
 - authentication, per-status responses and shared `$ref` schemas, when you describe them (below)
 
-**Custom route metadata:**
+**Custom route metadata:** what a route *does* (its schemas, middleware,
+hooks) sits at the top of its options; how it *appears in the docs* goes in
+`docs`:
 
 ```ts
 router.post(
   "/users",
   {
     bodySchema: CreateUserSchema,
-    responseSchema: UserSchema, // typed responses in the spec
-    tags: ["Users"],
-    summary: "Create a user",
-    description: "Creates a new account and returns the created user.",
+    responseSchema: UserSchema,
+    docs: {
+      tags: ["Users"],
+      summary: "Create a user",
+      description: "Creates a new account and returns the created user.",
+      operationId: "createUser",
+    },
   },
   handler,
 );
 ```
+
+`docs` takes `tags`, `summary`, `description`, `deprecated`, `operationId`,
+`security`, `files`, `bodyContentType`, `hidden` and `pathExample`. (`tags`,
+`summary`, `description`, `deprecated`, `hidden` and `pathExample` still work
+at the top level too, but are deprecated there.)
 
 **Tags** — describe the sections routes are grouped under, in the order
 the docs list them, and group the tags under headings for a big API:
@@ -468,7 +478,7 @@ router.post(
 ```
 
 This produces `/webhooks/events/{path}` and `/hooks/event` in the spec.
-For complex regular expressions, provide `pathExample` as a documentation
+For complex regular expressions, provide `docs.pathExample` as a documentation
 stand-in; runtime matching is unaffected.
 
 ### Authentication in the docs
@@ -494,8 +504,8 @@ app.use(
 const partners = createTypedRouter().useMiddleware(requireApiKey).security([{ apiKey: [] }]);
 
 // One route: [] is public; several entries are alternatives (a token *or* a key)
-router.post("/auth/sign-in", { security: [] }, signIn);
-router.get("/me", { security: [{ bearer: [] }, { apiKey: [] }] }, me);
+router.post("/auth/sign-in", { docs: { security: [] } }, signIn);
+router.get("/me", { docs: { security: [{ bearer: [] }, { apiKey: [] }] } }, me);
 ```
 
 The nearest setting wins: the route's, then its router's (or a parent
@@ -577,9 +587,9 @@ missing or invalid one answers the default 400, and reaches
 
 ### File uploads and other media types
 
-For a route that takes uploads, `files` documents its file fields; the body
-is then `multipart/form-data`, with `bodySchema`'s fields beside them.
-`bodyContentType` sets any other request media type, and a documented
+For a route that takes uploads, `docs.files` documents its file fields; the
+body is then `multipart/form-data`, with `bodySchema`'s fields beside them.
+`docs.bodyContentType` sets any other request media type, and a documented
 response can have its own `contentType`, for downloads:
 
 ```ts
@@ -588,7 +598,7 @@ router.post(
   {
     middleware: [upload.fields([{ name: "idImage" }, { name: "photos" }])], // multer does the uploading
     bodySchema: z.object({ idNumber: z.string() }),
-    files: { idImage: { required: true, description: "Front of the ID" }, photos: { multiple: true } },
+    docs: { files: { idImage: { required: true, description: "Front of the ID" }, photos: { multiple: true } } },
   },
   handler,
 );
@@ -697,7 +707,7 @@ app.use(
 );
 ```
 
-> Exclude an individual sensitive route from docs with `hidden: true` in its route options — works in any mode.
+> Exclude an individual sensitive route from docs with `docs: { hidden: true }` in its route options — works in any mode.
 
 **How it persists:** schemas fill in as traffic flows. They're held in memory and, when `specOutputPath` is set, written to the file (debounced) as new shapes are observed. On startup the library **reloads** the existing file, so a restart doesn't reset what was already learned — the file is the durable store.
 
