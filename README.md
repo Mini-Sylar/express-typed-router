@@ -432,6 +432,19 @@ router.post(
 );
 ```
 
+**Tags** — describe the sections routes are grouped under, in the order
+the docs list them, and group the tags under headings for a big API:
+
+```ts
+api.docs({
+  tags: [
+    { name: "Clients", description: "Sign clients up and keep their KYC current" },
+    { name: "Trading", description: "Buy and sell funds for them" },
+  ],
+  tagGroups: [{ name: "Partner API", tags: ["Clients", "Trading"] }],
+});
+```
+
 **Multi-router docs** — one `.docs()` call covers everything:
 
 ```ts

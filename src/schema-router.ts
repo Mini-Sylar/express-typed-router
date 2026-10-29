@@ -1355,6 +1355,26 @@ export interface DocsOptions {
    * responses: { 500: { description: "Something went wrong", schema: ApiError } }
    */
   responses?: Record<number, ResponseDoc>;
+  /**
+   * The tags routes are grouped under (a route's `tags`, or the first segment
+   * of its path), described, in the order the docs list them. Tags left out
+   * still appear, after these.
+   *
+   * @example
+   * tags: [
+   *   { name: "Clients", description: "Sign clients up and keep their KYC current" },
+   *   { name: "Trading", description: "Buy and sell funds for them" },
+   * ]
+   */
+  tags?: Array<{ name: string; description?: string; externalDocs?: { url: string; description?: string } }>;
+  /**
+   * Headings the docs' sidebar groups tags under (`x-tagGroups`, which Scalar
+   * and Redoc read), for an API with many of them.
+   *
+   * @example
+   * tagGroups: [{ name: "Clients", tags: ["Clients", "KYC"] }, { name: "Money", tags: ["Trading", "Deposits"] }]
+   */
+  tagGroups?: Array<{ name: string; tags: string[] }>;
 }
 
 interface RouteMetadata {
@@ -2241,6 +2261,8 @@ async function buildOpenApiSpec(
     },
     ...(options.servers ? { servers: options.servers } : {}),
     ...(options.security ? { security: options.security } : {}),
+    ...(options.tags?.length ? { tags: options.tags } : {}),
+    ...(options.tagGroups?.length ? { "x-tagGroups": options.tagGroups } : {}),
     paths,
     ...(Object.keys(components.schemas).length || options.securitySchemes
       ? {
