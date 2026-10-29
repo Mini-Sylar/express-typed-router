@@ -543,6 +543,27 @@ off with `documentValidationErrors: false`. A route whose
 `onBodyValidationFailure` (or query/params) hook can send something else gets
 the description only.
 
+### File uploads and other media types
+
+For a route that takes uploads, `files` documents its file fields; the body
+is then `multipart/form-data`, with `bodySchema`'s fields beside them.
+`bodyContentType` sets any other request media type, and a documented
+response can have its own `contentType`, for downloads:
+
+```ts
+router.post(
+  "/clients/:id/kyc",
+  {
+    middleware: [upload.fields([{ name: "idImage" }, { name: "photos" }])], // multer does the uploading
+    bodySchema: z.object({ idNumber: z.string() }),
+    files: { idImage: { required: true, description: "Front of the ID" }, photos: { multiple: true } },
+  },
+  handler,
+);
+
+router.get("/deposits/export", { responses: { 200: { description: "As CSV", contentType: "text/csv" } } }, exportCsv);
+```
+
 ### Typed responses
 
 With a `responseSchema`, or schemas in `responses`, `res.json()` is typed by

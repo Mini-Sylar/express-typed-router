@@ -989,6 +989,21 @@ export interface RouteOptions<
   /** Whether bodies sent are checked against their schema; wins over the router's. See {@link ResponseValidation}. */
   responseValidation?: ResponseValidation;
   /**
+   * The request body's media type in the docs, when it isn't JSON, e.g.
+   * "application/x-www-form-urlencoded". `files` implies multipart/form-data.
+   */
+  bodyContentType?: string;
+  /**
+   * The files a multipart body carries, by field name, for routes that take
+   * uploads (through multer, say). The body is documented as
+   * multipart/form-data: these as files, `bodySchema`'s fields beside them.
+   * Documentation only: the upload middleware still does the work.
+   *
+   * @example
+   * files: { idImage: { required: true }, photos: { multiple: true, description: "Up to 5" } }
+   */
+  files?: Record<string, FileField>;
+  /**
    * The operation's id, which client generators name its method after.
    * Generated from the method and path when not set (GET /orders/:id is
    * getOrdersById); set one for a friendlier name, e.g. "getOrder". It must
@@ -1105,6 +1120,8 @@ type DocMeta = Pick<
   | "deprecated"
   | "security"
   | "operationId"
+  | "bodyContentType"
+  | "files"
   | "hidden"
   | "pathExample"
 >;
@@ -1188,7 +1205,22 @@ export type ResponseValidation = "off" | "strip" | "strict";
  * A response to document, for {@link RouteOptions.responses}: its description,
  * or its description and the schema of its body.
  */
-export type ResponseDoc = string | { description: string; schema?: AnyStandardSchema };
+export type ResponseDoc =
+  | string
+  | {
+      description: string;
+      schema?: AnyStandardSchema;
+      /** The body's media type when it isn't JSON, e.g. "text/csv" or "application/pdf" for a download */
+      contentType?: string;
+    };
+
+/** A file a multipart body carries, for {@link RouteOptions.files} */
+export interface FileField {
+  description?: string;
+  required?: boolean;
+  /** Several files under the one name */
+  multiple?: boolean;
+}
 
 export interface DocsOptions {
   title?: string;
@@ -1305,6 +1337,8 @@ interface RouteMetadata {
   responses?: Record<number, ResponseDoc> | undefined;
   security?: SecurityRequirement[] | undefined;
   operationId?: string | undefined;
+  bodyContentType?: string | undefined;
+  files?: Record<string, FileField> | undefined;
   // A schema-specific validation failure hook, which may answer a bad request
   // with something other than the default 400
   customValidationResponse?: boolean | undefined;
@@ -2054,11 +2088,30 @@ async function buildOpenApiSpec(
         warnAboutUndefinedSchemes(route.security, options.securitySchemes, warnedSchemes);
       }
 
-      if (route.bodySchema) {
-        const bs = await components.ref(route.bodySchema);
+      const fileFields = Object.entries(route.files ?? {});
+      if (route.bodySchema || fileFields.length) {
+        const contentType = route.bodyContentType ?? (fileFields.length ? "multipart/form-data" : "application/json");
+        let schema: Record<string, any>;
+        if (!fileFields.length) {
+          schema = route.bodySchema ? await components.ref(route.bodySchema) : {};
+        } else {
+          // The files beside the body's own fields, so it's written out, not a $ref
+          const fields = route.bodySchema ? await components.inline(route.bodySchema) : {};
+          const properties: Record<string, any> = { ...fields.properties };
+          const required: string[] = [...(fields.required ?? [])];
+          for (const [name, file] of fileFields) {
+            const binary = { type: "string", format: "binary" };
+            properties[name] = {
+              ...(file.multiple ? { type: "array", items: binary } : binary),
+              ...(file.description ? { description: file.description } : {}),
+            };
+            if (file.required) required.push(name);
+          }
+          schema = { ...fields, type: "object", properties, ...(required.length ? { required } : {}) };
+        }
         operation.requestBody = {
-          required: true,
-          content: { "application/json": { schema: bs } },
+          required: Boolean(route.bodySchema) || fileFields.some(([, file]) => file.required),
+          content: { [contentType]: { schema } },
         };
       }
 
@@ -2094,11 +2147,14 @@ async function buildOpenApiSpec(
       // Documented responses: their descriptions win, and so do their schemas;
       // without one, whatever schema the status already has stays
       for (const [code, doc] of documented) {
-        const { description, schema } = typeof doc === "string" ? { description: doc, schema: undefined } : doc;
+        const { description, schema, contentType } =
+          typeof doc === "string" ? { description: doc, schema: undefined, contentType: undefined } : doc;
         const response: Record<string, any> = { ...responses[code], description };
         if (schema) {
           const json = await components.ref(schema);
-          if (Object.keys(json).length) response.content = { "application/json": { schema: json } };
+          if (Object.keys(json).length) response.content = { [contentType ?? "application/json"]: { schema: json } };
+        } else if (contentType) {
+          response.content = { [contentType]: {} };
         }
         responses[code] = response;
       }
@@ -3275,6 +3331,8 @@ export class TypedRouter<
       meta.responses = options.responses;
       meta.security = options.security;
       meta.operationId = options.operationId;
+      meta.bodyContentType = options.bodyContentType;
+      meta.files = options.files;
       meta.customValidationResponse = Boolean(
         options.hooks?.onBodyValidationFailure ||
           options.hooks?.onQueryValidationFailure ||
