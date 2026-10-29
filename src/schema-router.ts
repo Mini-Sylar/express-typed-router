@@ -591,7 +591,7 @@ export type TypedMiddleware<
   req: Request & TReq,
   res: Response<any, TLocals>,
   next: NextFunction,
-) => void | Promise<void>;
+) => unknown;
 
 /**
  * Simplified TypedMiddleware for request-only extensions (backward compatibility)
@@ -827,7 +827,7 @@ export interface ValidationFailureInfo<
  */
 export type ValidationFailureHook<
   MiddlewareProps extends Record<string, any> = {},
-> = (info: ValidationFailureInfo<MiddlewareProps>) => void | Promise<void>;
+> = (info: ValidationFailureInfo<MiddlewareProps>) => unknown;
 
 // A Standard Schema failure normalizes to StandardSchemaV1.Issue regardless
 // of which compliant library produced it (zod, valibot, arktype, ...), so
@@ -895,7 +895,7 @@ export type RouteValidationFailureHook<
     ParamsSchema,
     MiddlewareProps
   >,
-) => void | Promise<void>;
+) => unknown;
 
 /**
  * Passed to a schema-specific validation failure hook. Do nothing and the
@@ -922,7 +922,7 @@ export type SchemaValidationFailureHook<
   MiddlewareProps extends Record<string, any> = {},
 > = (
   info: SchemaValidationFailureInfo<S, MiddlewareProps>,
-) => void | Promise<void>;
+) => unknown;
 
 /** The default 400 response for a validation failure. Call it from a schema-specific hook to log first and still fall back to the normal response. */
 export function defaultValidationHandler(info: {
@@ -935,12 +935,12 @@ export function defaultValidationHandler(info: {
 // Fire-and-forget: catches both a synchronous throw and a rejected promise,
 // so a broken observer hook can't break the response it's watching.
 function callHookSafely<T>(
-  hook: ((info: T) => void | Promise<void>) | undefined,
+  hook: ((info: T) => unknown) | undefined,
   info: T,
 ): void {
   if (!hook) return;
   try {
-    hook(info)?.catch?.(() => {});
+    (hook(info) as Promise<unknown> | undefined)?.catch?.(() => {});
   } catch {}
 }
 
@@ -1497,8 +1497,19 @@ async function importDynamic(mod: string): Promise<any> {
   return _load(mod);
 }
 
-// Schemas are immutable objects — cache conversion results by identity
-const _schemaJsonCache = new WeakMap<object, Record<string, any>>();
+/**
+ * Which side of a schema the docs describe: what it accepts (a request's
+ * body, query, params and headers) or what it produces (a response). They
+ * differ for a field with a default (optional going in, always there coming
+ * out) or a transform.
+ */
+type SchemaIo = "input" | "output";
+
+// Schemas are immutable objects — cache conversion results by identity, per side
+const _schemaJsonCache: Record<SchemaIo, WeakMap<object, Record<string, any>>> = {
+  input: new WeakMap(),
+  output: new WeakMap(),
+};
 
 // A string path containing a named regex capture group — (?<id>...) — isn't
 // Express path syntax; Express's own string parser doesn't understand it.
@@ -1733,16 +1744,89 @@ function autoOperationId(method: string, openApiPath: string): string {
 
 async function trySchemaToJsonSchema(
   schema: AnyStandardSchema,
+  io: SchemaIo,
 ): Promise<Record<string, any>> {
-  const cached = _schemaJsonCache.get(schema as object);
+  const cache = _schemaJsonCache[io];
+  const cached = cache.get(schema as object);
   if (cached) return cached;
-  const result = await _resolveSchemaToJsonSchema(schema);
-  _schemaJsonCache.set(schema as object, result);
+  const result = unwrapRootRef(await _resolveSchemaToJsonSchema(schema, io));
+  cache.set(schema as object, result);
   return result;
+}
+
+const _warnedUnconvertible = new WeakSet<object>();
+
+// Said once per schema, as the docs are generated on every request for them
+function warnUnconvertible(schema: AnyStandardSchema, error: unknown): void {
+  if (_warnedUnconvertible.has(schema as object)) return;
+  _warnedUnconvertible.add(schema as object);
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[express-typed-router] A schema couldn't be described in the docs, so it's left out: ${message}`);
+}
+
+/**
+ * Zod's toJSONSchema() options for the docs. What JSON Schema can't express
+ * is left open rather than failing the whole schema, a date (sent as JSON) is
+ * a date-time string, and a transform's output, which can't be known, is
+ * described by what it takes.
+ */
+function zodJsonSchemaOptions(io: SchemaIo): Record<string, any> {
+  const options: Record<string, any> = {
+    io,
+    unrepresentable: "any",
+    override: (ctx: { zodSchema: any; jsonSchema: Record<string, any> }) => {
+      const def = ctx.zodSchema?._zod?.def;
+      if (def?.type === "date") {
+        Object.assign(ctx.jsonSchema, { type: "string", format: "date-time" });
+      } else if (
+        io === "output" &&
+        def?.type === "pipe" &&
+        def.out?._zod?.def?.type === "transform" &&
+        !Object.keys(ctx.jsonSchema).length
+      ) {
+        const { $schema: _, ...taken } = zodToJsonSchema(def.in, { ...options, io: "input" });
+        // Only a plain schema: one with named parts of its own would need them hoisted
+        if (!taken.$defs) Object.assign(ctx.jsonSchema, taken);
+      }
+    },
+  };
+  return options;
+}
+
+// The schema's own toJSONSchema() (Zod 4.1+), which belongs to the same copy
+// of Zod as the schema, else the zod module's
+function zodToJsonSchema(schema: any, options: Record<string, any>, mod?: any): Record<string, any> {
+  if (typeof schema.toJSONSchema === "function") return schema.toJSONSchema(options);
+  return mod.toJSONSchema(schema, options);
+}
+
+/**
+ * Zod 4.6+ writes a named schema as a $ref to itself, defined in $defs: the
+ * schema is the root again, and a reference back to it is "#".
+ */
+function unwrapRootRef(json: Record<string, any>): Record<string, any> {
+  const { $schema, $ref, $defs, ...rest } = json;
+  const name = typeof $ref === "string" ? /^#\/\$defs\/([^/]+)$/.exec($ref)?.[1] : undefined;
+  if (!name || !$defs?.[name] || Object.keys(rest).length) return json;
+  const { [name]: root, ...otherDefs } = $defs as Record<string, any>;
+  const selfRef = `#/$defs/${name}`;
+  const pointHome = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(pointHome);
+    if (!node || typeof node !== "object") return node;
+    return Object.fromEntries(
+      Object.entries(node).map(([key, value]) => [key, key === "$ref" && value === selfRef ? "#" : pointHome(value)]),
+    );
+  };
+  return pointHome({
+    ...($schema ? { $schema } : {}),
+    ...root,
+    ...(Object.keys(otherDefs).length ? { $defs: otherDefs } : {}),
+  }) as Record<string, any>;
 }
 
 async function _resolveSchemaToJsonSchema(
   schema: AnyStandardSchema,
+  io: SchemaIo,
 ): Promise<Record<string, any>> {
   // ArkType exposes toJsonSchema() directly on the type object
   if (typeof (schema as any).toJsonSchema === "function") {
@@ -1754,12 +1838,16 @@ async function _resolveSchemaToJsonSchema(
   const vendor: unknown = (schema as any)["~standard"]?.vendor;
 
   if (vendor === "zod") {
-    // Zod 4 has a built-in toJSONSchema export
-    try {
-      const mod = await importDynamic("zod");
-      if (typeof mod.toJSONSchema === "function")
-        return mod.toJSONSchema(schema) as Record<string, any>;
-    } catch {}
+    // Zod 4 converts its own schemas
+    const mod = typeof (schema as any).toJSONSchema === "function" ? undefined : await importDynamic("zod").catch(() => undefined);
+    if (typeof (schema as any).toJSONSchema === "function" || typeof mod?.toJSONSchema === "function") {
+      try {
+        return zodToJsonSchema(schema, zodJsonSchemaOptions(io), mod);
+      } catch (error) {
+        warnUnconvertible(schema, error);
+        return {};
+      }
+    }
     // Zod 3 needs the optional peer dep zod-to-json-schema
     try {
       const mod = await importDynamic("zod-to-json-schema");
@@ -1784,6 +1872,16 @@ async function _resolveSchemaToJsonSchema(
       if (typeof make === "function")
         return make(schema) as Record<string, any>;
     } catch {}
+  }
+
+  // Any other library implementing Standard JSON Schema describes either side itself
+  const standardJsonSchema = (schema as any)["~standard"]?.jsonSchema?.[io];
+  if (typeof standardJsonSchema === "function") {
+    try {
+      return standardJsonSchema({ target: "draft-2020-12" }) as Record<string, any>;
+    } catch (error) {
+      warnUnconvertible(schema, error);
+    }
   }
 
   return {};
@@ -2031,41 +2129,87 @@ class SchemaComponents {
     for (const [name, schema] of Object.entries(named)) this.named.set(schema as object, name);
   }
 
+  // Named schemas as requests take them, until finish() decides their names
+  private readonly inputSchemas: Record<string, Record<string, any>> = Object.create(null);
+
   /** Defines the docs' named schemas, used by a route or not */
   async addNamed(named: Record<string, AnyStandardSchema> = {}): Promise<void> {
-    for (const schema of Object.values(named)) await this.ref(schema);
+    for (const schema of Object.values(named)) await this.ref(schema, "output");
   }
 
   /** The schema as it goes in a request body or response: a $ref when it's named */
-  async ref(schema: AnyStandardSchema): Promise<Record<string, any>> {
-    const json = await trySchemaToJsonSchema(schema);
+  async ref(schema: AnyStandardSchema, io: SchemaIo): Promise<Record<string, any>> {
+    const json = await trySchemaToJsonSchema(schema, io);
     const name = schemaName(schema, json, this.named);
-    const inline = this.hoist(json, name);
+    const inline = this.hoist(json, name, io);
     if (!name || !Object.keys(inline).length) return inline;
-    this.add(name, inline);
-    return { $ref: COMPONENT_REF + name };
+    this.add(name, inline, io);
+    return { $ref: refPrefix(io) + name };
   }
 
   /** The schema written out, for reading its properties (path and query parameters) */
-  async inline(schema: AnyStandardSchema): Promise<Record<string, any>> {
-    const json = await trySchemaToJsonSchema(schema);
-    return this.hoist(json, schemaName(schema, json, this.named));
+  async inline(schema: AnyStandardSchema, io: SchemaIo): Promise<Record<string, any>> {
+    const json = await trySchemaToJsonSchema(schema, io);
+    return this.hoist(json, schemaName(schema, json, this.named), io);
+  }
+
+  /**
+   * Names the request side of each named schema, and points the spec's refs
+   * to them: one that's written the same both ways is a single component, and
+   * one that isn't (a default, say, is optional going in) is `NameInput`.
+   */
+  finish<T>(spec: T): T {
+    const inputs = this.inputSchemas;
+    const asOutput = (schema: unknown) => JSON.stringify(schema).replaceAll(INPUT_REF, COMPONENT_REF);
+    const differs = new Set(
+      Object.keys(inputs).filter((name) => this.schemas[name] && asOutput(inputs[name]) !== JSON.stringify(this.schemas[name])),
+    );
+    // One that refers to a schema that differs differs too
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const name of Object.keys(inputs)) {
+        if (differs.has(name) || !this.schemas[name]) continue;
+        if ([...differs].some((other) => JSON.stringify(inputs[name]).includes(`"${INPUT_REF}${other}"`))) {
+          differs.add(name);
+          grew = true;
+        }
+      }
+    }
+    const nameOf = (name: string) => (differs.has(name) ? `${name}Input` : name);
+    const repoint = (node: unknown): unknown => {
+      if (Array.isArray(node)) return node.map(repoint);
+      if (!node || typeof node !== "object") return node;
+      return Object.fromEntries(
+        Object.entries(node).map(([key, value]) => [
+          key,
+          key === "$ref" && typeof value === "string" && value.startsWith(INPUT_REF)
+            ? COMPONENT_REF + nameOf(value.slice(INPUT_REF.length))
+            : repoint(value),
+        ]),
+      );
+    };
+    for (const [name, schema] of Object.entries(inputs)) {
+      if (!this.schemas[nameOf(name)]) this.schemas[nameOf(name)] = schema;
+    }
+    for (const [name, schema] of Object.entries(this.schemas)) this.schemas[name] = repoint(schema) as Record<string, any>;
+    return repoint(spec) as T;
   }
 
   // Moves the schema's $defs into components and repoints refs to them. The
   // converted schema is cached (and shared), so this works on a copy.
-  private hoist(json: Record<string, any>, name: string | undefined): Record<string, any> {
+  private hoist(json: Record<string, any>, name: string | undefined, io: SchemaIo): Record<string, any> {
     const { $schema: _, $id: __, $defs, definitions, ...rest } = structuredClone(json);
     for (const [defName, def] of Object.entries({ ...definitions, ...$defs })) {
-      this.add(defName, this.hoist(def as Record<string, any>, defName));
+      this.add(defName, this.hoist(def as Record<string, any>, defName, io), io);
     }
-    return repointRefs(rest, name) as Record<string, any>;
+    return repointRefs(rest, name, refPrefix(io)) as Record<string, any>;
   }
 
-  private add(name: string, schema: Record<string, any>): void {
-    const existing = this.schemas[name];
+  private add(name: string, schema: Record<string, any>, io: SchemaIo = "output"): void {
+    const schemas = io === "input" ? this.inputSchemas : this.schemas;
+    const existing = schemas[name];
     if (!existing) {
-      this.schemas[name] = schema;
+      schemas[name] = schema;
     } else if (JSON.stringify(existing) !== JSON.stringify(schema)) {
       console.warn(
         `[express-typed-router] Two different schemas are both named "${name}"; the docs keep the first. Give each its own name.`,
@@ -2074,19 +2218,24 @@ class SchemaComponents {
   }
 }
 
+// Where a request-side schema's refs point until SchemaComponents.finish()
+// names them; never in a finished spec
+const INPUT_REF = "#/components/schemas/~input~/";
+const refPrefix = (io: SchemaIo) => (io === "input" ? INPUT_REF : COMPONENT_REF);
+
 // #/$defs/X becomes #/components/schemas/X; "#" (a schema referring to itself,
 // when it's recursive) becomes its own component when it has a name
-function repointRefs(node: unknown, selfName: string | undefined): unknown {
-  if (Array.isArray(node)) return node.map((item) => repointRefs(item, selfName));
+function repointRefs(node: unknown, selfName: string | undefined, prefix = COMPONENT_REF): unknown {
+  if (Array.isArray(node)) return node.map((item) => repointRefs(item, selfName, prefix));
   if (!node || typeof node !== "object") return node;
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(node)) {
     if (key === "$ref" && typeof value === "string") {
-      if (LOCAL_REF.test(value)) out[key] = value.replace(LOCAL_REF, COMPONENT_REF);
-      else if (value === "#" && selfName) out[key] = COMPONENT_REF + selfName;
+      if (LOCAL_REF.test(value)) out[key] = value.replace(LOCAL_REF, prefix);
+      else if (value === "#" && selfName) out[key] = prefix + selfName;
       else out[key] = value;
     } else {
-      out[key] = repointRefs(value, selfName);
+      out[key] = repointRefs(value, selfName, prefix);
     }
   }
   return out;
@@ -2129,7 +2278,7 @@ async function buildOpenApiSpec(
 
       let parameters: any[];
       if (route.paramsSchema) {
-        const ps = await components.inline(route.paramsSchema);
+        const ps = await components.inline(route.paramsSchema, "input");
         const props: Record<string, any> = ps.properties ?? {};
         const required: string[] = ps.required ?? [];
         parameters = Object.entries(props).map(([name, propSchema]) => ({
@@ -2148,7 +2297,7 @@ async function buildOpenApiSpec(
       }
 
       if (route.querySchema) {
-        const qs = await components.inline(route.querySchema);
+        const qs = await components.inline(route.querySchema, "input");
         const props: Record<string, any> = qs.properties ?? {};
         const required: string[] = qs.required ?? [];
         for (const [name, propSchema] of Object.entries(props)) {
@@ -2175,7 +2324,7 @@ async function buildOpenApiSpec(
       operationIds.add(operationId);
 
       if (route.headersSchema) {
-        const hs = await components.inline(route.headersSchema);
+        const hs = await components.inline(route.headersSchema, "input");
         const required: string[] = hs.required ?? [];
         for (const [name, propSchema] of Object.entries<Record<string, any>>(hs.properties ?? {})) {
           const { description, ...schema } = propSchema;
@@ -2208,10 +2357,10 @@ async function buildOpenApiSpec(
         const contentType = route.bodyContentType ?? (fileFields.length ? "multipart/form-data" : "application/json");
         let schema: Record<string, any>;
         if (!fileFields.length) {
-          schema = route.bodySchema ? await components.ref(route.bodySchema) : {};
+          schema = route.bodySchema ? await components.ref(route.bodySchema, "input") : {};
         } else {
           // The files beside the body's own fields, so it's written out, not a $ref
-          const fields = route.bodySchema ? await components.inline(route.bodySchema) : {};
+          const fields = route.bodySchema ? await components.inline(route.bodySchema, "input") : {};
           const properties: Record<string, any> = { ...fields.properties };
           const required: string[] = [...(fields.required ?? [])];
           for (const [name, file] of fileFields) {
@@ -2246,7 +2395,7 @@ async function buildOpenApiSpec(
       // say), else the first seen in traffic, else 200.
       const documented = Object.entries(layerResponses(options.responses, route.responses) ?? {});
       if (route.responseSchema) {
-        const declared = await components.ref(route.responseSchema);
+        const declared = await components.ref(route.responseSchema, "output");
         if (declared && Object.keys(declared).length) {
           const isSuccess = (code: number) => code >= 200 && code < 300;
           const successStatus =
@@ -2266,7 +2415,7 @@ async function buildOpenApiSpec(
           typeof doc === "string" ? { description: doc, schema: undefined, contentType: undefined } : doc;
         const response: Record<string, any> = { ...responses[code], description };
         if (schema) {
-          const json = await components.ref(schema);
+          const json = await components.ref(schema, "output");
           if (Object.keys(json).length) response.content = { [contentType ?? "application/json"]: { schema: json } };
         } else if (contentType) {
           response.content = { [contentType]: {} };
@@ -2295,6 +2444,7 @@ async function buildOpenApiSpec(
     }
   }
 
+  const finishedPaths = components.finish(paths);
   return {
     openapi: "3.1.0",
     info: {
@@ -2306,7 +2456,7 @@ async function buildOpenApiSpec(
     ...(options.security ? { security: options.security } : {}),
     ...(options.tags?.length ? { tags: options.tags } : {}),
     ...(options.tagGroups?.length ? { "x-tagGroups": options.tagGroups } : {}),
-    paths,
+    paths: finishedPaths,
     ...(Object.keys(components.schemas).length || options.securitySchemes
       ? {
           components: {
@@ -2390,7 +2540,7 @@ export class TypedRouter<
    * Set the global validation failure hook. Called for every route
    * registered directly on this router when bodySchema/querySchema/
    * paramsSchema rejects a request. Works the same whether the router came
-   * from createTypedRouter() or createTypedRouterWithConfig({ onValidationFailure }),
+   * from createTypedRouter() or createTypedRouterWithConfig({ hooks: { onValidationFailure } }),
    * so you're not locked into the config-taking factory just to add this later.
    *
    * @example
