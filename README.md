@@ -413,21 +413,46 @@ app.use(
 - query and body schemas (from `querySchema` / `bodySchema`)
 - **response schemas** — inferred from real traffic (see [Response schemas](#response-schemas-from-live-traffic) below)
 - tags and summaries — inferred from route paths, or set manually
+- an `operationId` for each route, from its method and path (`GET /orders/:id` is `getOrdersById`), which client generators name their methods after; set `docs.operationId` on a route for a friendlier one
+- authentication, per-status responses and shared `$ref` schemas, when you describe them (below)
 
-**Custom route metadata:**
+**Custom route metadata:** what a route *does* (its schemas, middleware,
+hooks) sits at the top of its options; how it *appears in the docs* goes in
+`docs`:
 
 ```ts
 router.post(
   "/users",
   {
     bodySchema: CreateUserSchema,
-    responseSchema: UserSchema, // typed responses in the spec
-    tags: ["Users"],
-    summary: "Create a user",
-    description: "Creates a new account and returns the created user.",
+    responseSchema: UserSchema,
+    docs: {
+      tags: ["Users"],
+      summary: "Create a user",
+      description: "Creates a new account and returns the created user.",
+      operationId: "createUser",
+    },
   },
   handler,
 );
+```
+
+`docs` takes `tags`, `summary`, `description`, `deprecated`, `operationId`,
+`security`, `files`, `bodyContentType`, `hidden` and `pathExample`. (`tags`,
+`summary`, `description`, `deprecated`, `hidden` and `pathExample` still work
+at the top level too, but are deprecated there.)
+
+**Tags** — describe the sections routes are grouped under, in the order
+the docs list them, and group the tags under headings for a big API:
+
+```ts
+api.docs({
+  tags: [
+    { name: "Clients", description: "Sign clients up and keep their KYC current" },
+    { name: "Trading", description: "Buy and sell funds for them" },
+  ],
+  tagGroups: [{ name: "Partner API", tags: ["Clients", "Trading"] }],
+});
 ```
 
 **Multi-router docs** — one `.docs()` call covers everything:
@@ -453,8 +478,189 @@ router.post(
 ```
 
 This produces `/webhooks/events/{path}` and `/hooks/event` in the spec.
-For complex regular expressions, provide `pathExample` as a documentation
+For complex regular expressions, provide `docs.pathExample` as a documentation
 stand-in; runtime matching is unaffected.
+
+### Authentication in the docs
+
+Describe how your API authenticates once, under a name, then say which routes
+need it. The docs UI gets an **Authorize** button (so "Try it out" sends your
+key or token), and client generators know what to send.
+
+```ts
+app.use(
+  "/docs",
+  api.docs({
+    title: "My API",
+    securitySchemes: {
+      apiKey: { type: "apiKey", in: "header", name: "x-api-key" },
+      bearer: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+    },
+    security: [{ bearer: [] }], // what every route needs, unless it says otherwise
+  }),
+);
+
+// A router's routes, typically what its auth middleware enforces
+const partners = createTypedRouter().useMiddleware(requireApiKey).security([{ apiKey: [] }]);
+
+// One route: [] is public; several entries are alternatives (a token *or* a key)
+router.post("/auth/sign-in", { docs: { security: [] } }, signIn);
+router.get("/me", { docs: { security: [{ bearer: [] }, { apiKey: [] }] } }, me);
+```
+
+The nearest setting wins: the route's, then its router's (or a parent
+router's), then the docs'. Any OpenAPI scheme works: `apiKey` (in a header,
+query or cookie), `http` (bearer or basic), `oauth2`, `openIdConnect` and
+`mutualTLS`. It's documentation only: enforcing it is still your
+middleware's job.
+
+### Documenting responses
+
+`responses` documents each status a route can answer with: a description, or a
+description and the schema of the body.
+
+```ts
+router.post(
+  "/orders",
+  {
+    bodySchema: CreateOrder,
+    responseSchema: Order,
+    responses: {
+      201: "The order, placed",
+      400: { description: "The body failed validation", schema: ApiError },
+      404: { description: "No such account", schema: ApiError },
+    },
+  },
+  placeOrder,
+);
+```
+
+`responseSchema` goes under the first success status listed (201 here),
+else 200. A schema in `responses` wins over one inferred from traffic;
+without one, an inferred schema for that status is kept under your
+description.
+
+Responses every route behind some middleware can give (a 401, a 500) are
+documented once, on the router, or for the whole API in the docs:
+
+```ts
+const api = createTypedRouter().responses({
+  401: { description: "No valid API key", schema: ApiError },
+  500: { description: "Something went wrong", schema: ApiError },
+});
+
+app.use("/docs", api.docs({ responses: { 503: "Down for maintenance" } }));
+```
+
+The nearest wins for each status: the route's, then its router's (or a
+parent router's), then the docs'. A description on its own keeps the schema
+from below, so a route can reword a response without losing its body. A
+router's schemas type `res.json()` in every route on it (call
+`.responses()` before adding routes), and count for `responseValidation`.
+
+A route with a `bodySchema`, `querySchema` or `paramsSchema` gets its 400
+documented for you: the body the library sends when validation fails
+(`{ error: "Validation failed", details: [...] }`), as a shared
+`ValidationError` schema. Document your own 400 to replace it, or turn it
+off with `documentValidationErrors: false`. A route whose
+`onBodyValidationFailure` (or query/params) hook can send something else gets
+the description only.
+
+### Request headers
+
+`headersSchema` validates, types and documents headers, like `bodySchema`
+does the body. Name them in lowercase, as Node gives them:
+
+```ts
+router.post(
+  "/payments",
+  { headersSchema: z.object({ "idempotency-key": z.uuid().describe("Makes retries safe") }) },
+  (req, res) => {
+    req.headers["idempotency-key"]; // string, validated
+  },
+);
+```
+
+The parsed values are merged over `req.headers`, so other headers stay. A
+missing or invalid one answers the default 400, and reaches
+`onValidationFailure` with `source: "headers"`.
+
+### File uploads and other media types
+
+For a route that takes uploads, `docs.files` documents its file fields; the
+body is then `multipart/form-data`, with `bodySchema`'s fields beside them.
+`docs.bodyContentType` sets any other request media type, and a documented
+response can have its own `contentType`, for downloads:
+
+```ts
+router.post(
+  "/clients/:id/kyc",
+  {
+    middleware: [upload.fields([{ name: "idImage" }, { name: "photos" }])], // multer does the uploading
+    bodySchema: z.object({ idNumber: z.string() }),
+    docs: { files: { idImage: { required: true, description: "Front of the ID" }, photos: { multiple: true } } },
+  },
+  handler,
+);
+
+router.get("/deposits/export", { responses: { 200: { description: "As CSV", contentType: "text/csv" } } }, exportCsv);
+```
+
+### Typed responses
+
+With a `responseSchema`, or schemas in `responses`, `res.json()` is typed by
+status: `res.json()` and `res.status(201).json()` take the success schema's
+input, `res.status(404).json()` the schema documented for 404, and a status
+with no schema stays untyped, as Express has it.
+
+```ts
+router.post("/orders", { responseSchema: Order, responses: { 400: { description: "Invalid", schema: ApiError } } }, (req, res) => {
+  res.status(400).json({ error: "Send an amount" }); // must be an ApiError
+  res.status(201).json(order); // must be an Order
+});
+```
+
+### Keeping responses to their schema
+
+A schema says what a response *should* contain; `responseValidation` makes
+sure that's all it contains. Set it on a router (or a route):
+
+```ts
+const api = createTypedRouter().responseValidation(
+  process.env.NODE_ENV === "production" ? "strip" : "strict",
+);
+// or createTypedRouterWithConfig({ responseValidation: ... }), as with
+// .security() and .responses()
+
+api.get("/users/:id", { responseSchema: User }, async (req, res) => {
+  res.json(await db.findUser(req.params.id)); // passwordHash isn't in User, so it isn't sent
+});
+```
+
+- `"strip"`: a body that matches is sent as the schema outputs it, so fields
+  it doesn't declare never leave. One that doesn't match is sent unchanged,
+  with a warning
+- `"strict"`: the same, but a body that doesn't match is a 500, so a handler
+  drifting from its schema is caught in development and tests
+- `"off"` (the default): schemas only document and type responses
+
+It applies to each status that has a schema, and to JSON bodies (`res.json`,
+and `res.send` with an object).
+
+### Shared schemas (`$ref`)
+
+A schema with a name is defined once, under `components.schemas`, and every
+route that uses it gets a `$ref` to it. Name it with Zod's metadata, or, for
+any validator, in the docs' `schemas`:
+
+```ts
+const Money = z.string().regex(/^\d+(\.\d{1,2})?$/).meta({ id: "Money" });
+const Order = z.object({ id: z.number(), amount: Money }).meta({ id: "Order" });
+
+api.docs({ schemas: { ApiError } }); // named by the schema object itself
+```
+
+Named schemas nested in others (`amount: Money`) become refs too.
 
 ### Response schemas from live traffic
 
@@ -501,7 +707,7 @@ app.use(
 );
 ```
 
-> Exclude an individual sensitive route from docs with `hidden: true` in its route options — works in any mode.
+> Exclude an individual sensitive route from docs with `docs: { hidden: true }` in its route options — works in any mode.
 
 **How it persists:** schemas fill in as traffic flows. They're held in memory and, when `specOutputPath` is set, written to the file (debounced) as new shapes are observed. On startup the library **reloads** the existing file, so a restart doesn't reset what was already learned — the file is the durable store.
 
@@ -840,6 +1046,9 @@ Use a schema that actually parses the text:
 | `createTypedRouterWithConfig(config)`    | Create a router with an error handler and/or global config |
 | `router.useMiddleware(mw)`               | Add typed global middleware (returns new router) |
 | `router.onValidationFailure(hook)`       | Set the global validation failure hook (returns same router) |
+| `router.security(requirements)`          | The security this router's routes need in the docs (returns same router) |
+| `router.responses(responses)`            | Responses this router's routes can give, documented once (returns same router) |
+| `router.responseValidation(mode)`        | Check bodies sent against their response schema: `"strip"`, `"strict"` or `"off"` (returns same router) |
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |

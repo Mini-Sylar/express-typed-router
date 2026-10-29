@@ -652,7 +652,12 @@ export type SchemaRequest<
   MiddlewareProps extends Record<string, any> = {},
   ParamsSchema extends SchemaLike | undefined = undefined,
   ParamsOverride extends Record<string, any> | undefined = undefined,
-> = Omit<Request, "params" | "query" | "body"> & {
+  HeadersSchema extends SchemaLike | undefined = undefined,
+> = Omit<Request, "params" | "query" | "body" | "headers"> & {
+  // The headers the schema validated (by their lowercase names), beside the rest
+  headers: HeadersSchema extends undefined
+    ? Request["headers"]
+    : Request["headers"] & InferSchemaOutput<HeadersSchema>;
   params: ParamsOverride extends undefined
     ? ParamsSchema extends undefined
       ? ExtractRouteParams<Path>
@@ -673,6 +678,9 @@ export type SchemaRouteHandler<
   ResponseLocals extends Record<string, any> = {},
   ParamsSchema extends SchemaLike | undefined = undefined,
   ParamsOverride extends Record<string, any> | undefined = undefined,
+  ResponseSchema extends AnyStandardSchema | undefined = undefined,
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
+  HeadersSchema extends SchemaLike | undefined = undefined,
 > = (
   req: SchemaRequest<
     Path,
@@ -680,9 +688,14 @@ export type SchemaRouteHandler<
     QuerySchema,
     MiddlewareProps,
     ParamsSchema,
-    ParamsOverride
+    ParamsOverride,
+    HeadersSchema
   >,
-  res: Response<any, ResponseLocals>,
+  // Plain Express when the route documents no response schemas, so nothing
+  // changes for it
+  res: [ResponseSchema, Responses] extends [undefined, undefined]
+    ? Response<any, ResponseLocals>
+    : TypedResponse<ResponseLocals, ResponseSchema, Responses>,
   next?: NextFunction,
 ) =>
   | void
@@ -690,7 +703,85 @@ export type SchemaRouteHandler<
   | Promise<void | undefined>
   | Response
   | Promise<Response>
-  | Promise<Response | undefined>;
+  | Promise<Response | undefined>
+  | TypedResponse<any, any, any>
+  | Promise<TypedResponse<any, any, any> | undefined>;
+
+// ─── Typed responses ─────────────────────────────────────────────────────────
+// Express gives res.json() one body type for every status. A route's bodies
+// are typed per status instead: a success one (2xx, or no status set) by its
+// responseSchema, any other by the schema `responses` documents for it, and a
+// status with no schema stays untyped, as Express has it. Bodies are typed by
+// the schema's input, since what's sent is run through the schema (extra
+// fields an object picked up elsewhere are allowed, and stripped).
+
+type IsSuccessStatus<Code extends number> = `${Code}` extends `2${number}` ? true : false;
+
+type DocumentedBody<Doc> = Doc extends { schema: infer S }
+  ? S extends AnyStandardSchema
+    ? StandardSchemaV1.InferInput<S>
+    : never
+  : never;
+
+/** The body a route may send with a status, from its responseSchema and `responses` */
+export type ResponseBodyFor<Code extends number, ResponseSchema, Responses> =
+  // A schema documented for this exact status wins
+  Responses extends Record<number, ResponseDoc>
+    ? Code extends keyof Responses
+      ? [DocumentedBody<Responses[Code]>] extends [never]
+        ? SuccessBody<Code, ResponseSchema>
+        : DocumentedBody<Responses[Code]>
+      : SuccessBody<Code, ResponseSchema>
+    : SuccessBody<Code, ResponseSchema>;
+
+type SuccessBody<Code extends number, ResponseSchema> = IsSuccessStatus<Code> extends true
+  ? ResponseSchema extends AnyStandardSchema
+    ? StandardSchemaV1.InferInput<ResponseSchema>
+    : any
+  : any;
+
+/**
+ * A router's documented responses under a route's, as they're layered at
+ * runtime: the route's win for the statuses they document, but a description
+ * on its own keeps the router's schema.
+ */
+export type LayerResponses<Under, Over> =
+  Under extends Record<number, ResponseDoc>
+    ? Over extends Record<number, ResponseDoc>
+      ? {
+          [Code in keyof Under | keyof Over]: Code extends keyof Over
+            ? Over[Code] extends string
+              ? Code extends keyof Under
+                ? Under[Code] extends { schema: infer S }
+                  ? { description: string; schema: S }
+                  : Over[Code]
+                : Over[Code]
+              : Over[Code]
+            : Code extends keyof Under
+              ? Under[Code]
+              : never;
+        }
+      : Under
+    : Over;
+
+/**
+ * `res` for a route with response schemas: Express's Response, with `json()`
+ * (and `status(code).json()`) taking the body that status is documented with.
+ */
+export type TypedResponse<
+  Locals extends Record<string, any>,
+  ResponseSchema,
+  Responses,
+> = Omit<Response<any, Locals>, "json" | "status"> & {
+  /** Sends JSON with the status set (200 if none), as its schema types it */
+  json(body?: ResponseBodyFor<200, ResponseSchema, Responses>): TypedResponse<Locals, ResponseSchema, Responses>;
+  /** Sets the status; `json()` after it takes that status's body */
+  status<Code extends number>(
+    code: Code,
+  ): Omit<TypedResponse<Locals, ResponseSchema, Responses>, "json"> & {
+    json(body?: ResponseBodyFor<Code, ResponseSchema, Responses>): TypedResponse<Locals, ResponseSchema, Responses>;
+  };
+};
 
 /**
  * Options for defining a typed route, including schemas and middleware.
@@ -704,7 +795,7 @@ export type SchemaRouteHandler<
  * @property middleware - Optional array of TypedMiddleware for this route.
  */
 /** Which validated part of the request failed. */
-export type ValidationFailureSource = "body" | "query" | "params";
+export type ValidationFailureSource = "body" | "query" | "params" | "headers";
 
 /**
  * Passed to a validation failure hook when bodySchema/querySchema/paramsSchema
@@ -779,6 +870,14 @@ export type RouteValidationFailureInfo<
       source: "params";
       error: string;
       details: SchemaValidationDetails<ParamsSchema>;
+      method: HttpMethod;
+      path: string;
+      req: Request & MiddlewareProps;
+    }
+  | {
+      source: "headers";
+      error: string;
+      details: readonly StandardSchemaV1.Issue[];
       method: HttpMethod;
       path: string;
       req: Request & MiddlewareProps;
@@ -884,6 +983,60 @@ export interface RouteHooks<
   onParamsValidationFailure?: SchemaValidationFailureHook<ParamsSchema, MiddlewareProps>;
 }
 
+/**
+ * How a route appears in the docs, for {@link RouteOptions.docs}. None of it
+ * changes what the route does.
+ */
+export interface RouteDocs {
+  /** The sections it's listed under; the first segment of its path when not set */
+  tags?: string[];
+  /** A one-line title; generated from the method and path when not set */
+  summary?: string;
+  /** What it does, in as much detail as a caller needs (Markdown) */
+  description?: string;
+  /** Marks it as on its way out */
+  deprecated?: boolean;
+  /**
+   * The operation's id, which client generators name its method after.
+   * Generated from the method and path when not set (GET /orders/:id is
+   * getOrdersById); set one for a friendlier name, e.g. "getOrder". It must
+   * be unique across the API.
+   */
+  operationId?: string;
+  /**
+   * The security it needs, by the names in {@link DocsOptions.securitySchemes}.
+   * Wins over its router's and the docs' defaults; `[]` marks it as needing
+   * none (say, a sign-in route under an authenticated router). Enforcing it
+   * is still your middleware's job.
+   */
+  security?: SecurityRequirement[];
+  /**
+   * The files a multipart body carries, by field name, for routes that take
+   * uploads (through multer, say). The body is documented as
+   * multipart/form-data: these as files, `bodySchema`'s fields beside them.
+   * The upload middleware still does the uploading.
+   *
+   * @example
+   * files: { idImage: { required: true }, photos: { multiple: true, description: "Up to 5" } }
+   */
+  files?: Record<string, FileField>;
+  /**
+   * The request body's media type when it isn't JSON, e.g.
+   * "application/x-www-form-urlencoded". `files` implies multipart/form-data.
+   */
+  bodyContentType?: string;
+  /** Leaves it out of the docs altogether */
+  hidden?: boolean;
+  /**
+   * Stand-in path(s) for the docs. Required for a `RegExp` route (defaults
+   * to `regex.toString()` otherwise); optional for a string route, to
+   * override an ambiguous auto-converted path. An array documents the route
+   * under several paths at once (e.g. a wildcard commonly hit a few ways), one
+   * entry per element. Doesn't affect `req.params`.
+   */
+  pathExample?: string | string[];
+}
+
 export interface RouteOptions<
   BodySchema extends SchemaLike | undefined = undefined,
   QuerySchema extends SchemaLike | undefined = undefined,
@@ -904,24 +1057,55 @@ export interface RouteOptions<
    * string-arrival caveat as `querySchema` applies; see its docs above.
    */
   paramsSchema?: ParamsSchema;
+  /**
+   * Validates, types and documents request headers. Name them in lowercase,
+   * as Node gives them (`"idempotency-key"`, not `"Idempotency-Key"`). The
+   * parsed values are merged over `req.headers`, so the others stay. A
+   * failure answers the default 400, and reaches onValidationFailure with
+   * `source: "headers"`.
+   *
+   * @example
+   * headersSchema: z.object({ "idempotency-key": z.uuid() })
+   */
+  headersSchema?: SchemaLike;
   /** hooks.onValidationFailure runs in addition to the router's global hook (set via createTypedRouterWithConfig or router.onValidationFailure()), if both are set. */
   hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema>;
   middleware?: TypedMiddleware<any, any>[];
-  tags?: string[];
-  description?: string;
-  summary?: string;
-  deprecated?: boolean;
-  responseSchema?: AnyStandardSchema;
-  /** Exclude this route from the generated OpenAPI spec entirely. */
-  hidden?: boolean;
   /**
-   * Stand-in path(s) for the OpenAPI doc. Required for a `RegExp` route
-   * (defaults to `regex.toString()` otherwise); optional for a string
-   * route, to override an ambiguous auto-converted path. An array documents
-   * the route under multiple paths at once (e.g. a wildcard that's commonly
-   * hit a few different ways), one spec entry per element. Doc-only,
-   * doesn't affect `req.params`.
+   * The body a success response sends: documents it, types `res.json()`, and
+   * with `responseValidation` on, is what's sent. For other statuses, or a
+   * success status other than 200, see `responses`.
    */
+  responseSchema?: AnyStandardSchema;
+  /**
+   * The responses this route can give, by status code: a description, or a
+   * description and the schema of the body (which types `res.status(code).json()`
+   * and is used by `responseValidation`). A schema here wins over one
+   * inferred from traffic; without one, an inferred schema for that status is
+   * kept under your description.
+   *
+   * @example
+   * responses: {
+   *   201: "The user, created",
+   *   404: { description: "No such user", schema: ErrorSchema },
+   * }
+   */
+  responses?: Record<number, ResponseDoc>;
+  /** Whether bodies sent are checked against their schema; wins over the router's. See {@link ResponseValidation}. */
+  responseValidation?: ResponseValidation;
+  /** How the route appears in the docs: its tags, summary, security and so on. See {@link RouteDocs}. */
+  docs?: RouteDocs;
+  /** @deprecated Use `docs.tags`. */
+  tags?: string[];
+  /** @deprecated Use `docs.summary`. */
+  summary?: string;
+  /** @deprecated Use `docs.description`. */
+  description?: string;
+  /** @deprecated Use `docs.deprecated`. */
+  deprecated?: boolean;
+  /** @deprecated Use `docs.hidden`. */
+  hidden?: boolean;
+  /** @deprecated Use `docs.pathExample`. */
   pathExample?: string | string[];
 }
 
@@ -948,7 +1132,14 @@ type NormalizeHandlerMiddleware<Middleware> =
 
 type InferHandlerOption<
   Options extends InferSchemaHandlerOptions,
-  Key extends "bodySchema" | "querySchema" | "paramsSchema" | "middleware",
+  Key extends
+    | "bodySchema"
+    | "querySchema"
+    | "paramsSchema"
+    | "headersSchema"
+    | "middleware"
+    | "responseSchema"
+    | "responses",
 > = Key extends keyof Options ? Options[Key] : undefined;
 
 /**
@@ -976,7 +1167,10 @@ export type InferSchemaHandler<Options extends InferSchemaHandlerOptions = {}> =
       NormalizeHandlerMiddleware<InferHandlerOption<Options, "middleware">>
     >,
     InferHandlerOption<Options, "paramsSchema">,
-    Record<string, string | string[] | undefined>
+    Record<string, string | string[] | undefined>,
+    InferHandlerOption<Options, "responseSchema">,
+    InferHandlerOption<Options, "responses">,
+    InferHandlerOption<Options, "headersSchema">
   >;
 
 type RouteHandlerFromOptions<
@@ -987,13 +1181,20 @@ type RouteHandlerFromOptions<
   RouterReq extends Record<string, any>,
   RouterLocals extends Record<string, any>,
   M extends TypedMiddleware<any, any>[],
+  ResponseSchema extends AnyStandardSchema | undefined = undefined,
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
+  HeadersSchema extends SchemaLike | undefined = undefined,
 > = SchemaRouteHandler<
   Path,
   NoInfer<BodySchema>,
   NoInfer<QuerySchema>,
   RouterReq & InferMiddlewareProps<readonly [...M]>,
   RouterLocals & InferMiddlewareLocals<readonly [...M]>,
-  NoInfer<ParamsSchema>
+  NoInfer<ParamsSchema>,
+  undefined,
+  NoInfer<ResponseSchema>,
+  NoInfer<Responses>,
+  NoInfer<HeadersSchema>
 >;
 
 // Doc-only fields extracted from RouteOptions — merged into typed middleware
@@ -1001,13 +1202,7 @@ type RouteHandlerFromOptions<
 // without TypeScript's excess-property checking dropping the typed overload.
 type DocMeta = Pick<
   RouteOptions,
-  | "tags"
-  | "summary"
-  | "description"
-  | "deprecated"
-  | "responseSchema"
-  | "hidden"
-  | "pathExample"
+  "docs" | "tags" | "summary" | "description" | "deprecated" | "hidden" | "pathExample"
 >;
 
 // HTTP methods
@@ -1022,6 +1217,89 @@ export type HttpMethod =
   | "all";
 
 // ─── OpenAPI / Docs ──────────────────────────────────────────────────────────
+
+/** An OAuth 2 flow, as OpenAPI describes one. `scopes` maps each scope to what it allows. */
+export interface OAuthFlow {
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  refreshUrl?: string;
+  scopes: Record<string, string>;
+}
+
+/**
+ * One way an API authenticates, as OpenAPI describes it. Name each in
+ * {@link DocsOptions.securitySchemes}, then require it by that name with
+ * `security` (on the docs, a router, or a route).
+ *
+ * @example
+ * { type: "apiKey", in: "header", name: "x-api-key" }
+ * { type: "http", scheme: "bearer", bearerFormat: "JWT" }
+ * { type: "apiKey", in: "cookie", name: "session" }
+ */
+export type SecurityScheme = { description?: string } & (
+  | { type: "apiKey"; name: string; in: "header" | "query" | "cookie" }
+  | { type: "http"; scheme: "bearer" | "basic" | (string & {}); bearerFormat?: string }
+  | {
+      type: "oauth2";
+      flows: {
+        implicit?: OAuthFlow;
+        password?: OAuthFlow;
+        clientCredentials?: OAuthFlow;
+        authorizationCode?: OAuthFlow;
+      };
+    }
+  | { type: "openIdConnect"; openIdConnectUrl: string }
+  | { type: "mutualTLS" }
+);
+
+/**
+ * One way to satisfy a request's security: the schemes it needs together, by
+ * name, each with the OAuth scopes it needs (`[]` for none, and for every
+ * scheme that isn't OAuth). A list of these is alternatives: any one will do.
+ *
+ * @example
+ * [{ apiKey: [] }]                    // an API key
+ * [{ bearer: [] }, { apiKey: [] }]    // a bearer token, or an API key
+ * []                                  // nothing: a public route
+ */
+export type SecurityRequirement = Record<string, string[]>;
+
+/**
+ * What happens to a body sent with a status that has a response schema
+ * (`responseSchema` for success, or one in `responses`):
+ *
+ * - `"off"` (the default): nothing; the schemas only document and type it
+ * - `"strip"`: a body that matches is sent as the schema outputs it, so fields
+ *   it doesn't declare (an internal id, a password hash) never leave. One that
+ *   doesn't match is sent as it is, with a warning
+ * - `"strict"`: as `"strip"`, but a body that doesn't match is a 500 instead,
+ *   so a schema and its handler drifting apart is noticed at once
+ *
+ * @example
+ * responseValidation: process.env.NODE_ENV === "production" ? "strip" : "strict"
+ */
+export type ResponseValidation = "off" | "strip" | "strict";
+
+/**
+ * A response to document, for {@link RouteOptions.responses}: its description,
+ * or its description and the schema of its body.
+ */
+export type ResponseDoc =
+  | string
+  | {
+      description: string;
+      schema?: AnyStandardSchema;
+      /** The body's media type when it isn't JSON, e.g. "text/csv" or "application/pdf" for a download */
+      contentType?: string;
+    };
+
+/** A file a multipart body carries, for {@link RouteOptions.files} */
+export interface FileField {
+  description?: string;
+  required?: boolean;
+  /** Several files under the one name */
+  multiple?: boolean;
+}
 
 export interface DocsOptions {
   title?: string;
@@ -1072,6 +1350,74 @@ export interface DocsOptions {
    * @default true
    */
   sampleResponses?: boolean | "live";
+  /**
+   * How the API authenticates, each scheme under a name that `security`
+   * refers to. Becomes `components.securitySchemes`, which is what gives the
+   * docs UI its Authorize button and tells client generators what to send.
+   *
+   * @example
+   * securitySchemes: {
+   *   apiKey: { type: "apiKey", in: "header", name: "x-api-key" },
+   *   bearer: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+   * }
+   */
+  securitySchemes?: Record<string, SecurityScheme>;
+  /**
+   * The security every route needs unless its router or the route itself
+   * says otherwise (see {@link SecurityRequirement}).
+   *
+   * @example
+   * security: [{ apiKey: [] }]
+   */
+  security?: SecurityRequirement[];
+  /**
+   * Schemas to name, for any validator: each is defined once under that name
+   * in `components.schemas`, and wherever a route uses the same schema it's a
+   * `$ref` to it. (Zod schemas can name themselves instead, with
+   * `.meta({ id: "Order" })`.)
+   *
+   * @example
+   * schemas: { Order: OrderSchema, Error: ErrorSchema }
+   */
+  schemas?: Record<string, AnyStandardSchema>;
+  /**
+   * Document the 400 a route answers when its body, query or params fail
+   * validation, as the `ValidationError` schema (unless the route documents
+   * its own 400). A route whose schema-specific failure hook may send
+   * something else gets the description only.
+   * @default true
+   */
+  documentValidationErrors?: boolean;
+  /**
+   * Responses every route can give (a 401 behind auth, a 500), documented
+   * once. A router's `responses()` and a route's own win for the statuses they
+   * document. Documentation only: these don't type or check bodies, a
+   * router's and a route's do.
+   *
+   * @example
+   * responses: { 500: { description: "Something went wrong", schema: ApiError } }
+   */
+  responses?: Record<number, ResponseDoc>;
+  /**
+   * The tags routes are grouped under (a route's `tags`, or the first segment
+   * of its path), described, in the order the docs list them. Tags left out
+   * still appear, after these.
+   *
+   * @example
+   * tags: [
+   *   { name: "Clients", description: "Sign clients up and keep their KYC current" },
+   *   { name: "Trading", description: "Buy and sell funds for them" },
+   * ]
+   */
+  tags?: Array<{ name: string; description?: string; externalDocs?: { url: string; description?: string } }>;
+  /**
+   * Headings the docs' sidebar groups tags under (`x-tagGroups`, which Scalar
+   * and Redoc read), for an API with many of them.
+   *
+   * @example
+   * tagGroups: [{ name: "Clients", tags: ["Clients", "KYC"] }, { name: "Money", tags: ["Trading", "Deposits"] }]
+   */
+  tagGroups?: Array<{ name: string; tags: string[] }>;
 }
 
 interface RouteMetadata {
@@ -1082,11 +1428,20 @@ interface RouteMetadata {
   bodySchema?: AnyStandardSchema | undefined;
   querySchema?: AnyStandardSchema | undefined;
   paramsSchema?: AnyStandardSchema | undefined;
+  headersSchema?: AnyStandardSchema | undefined;
   tags?: string[] | undefined;
   description?: string | undefined;
   summary?: string | undefined;
   deprecated?: boolean | undefined;
   responseSchema?: AnyStandardSchema | undefined;
+  responses?: Record<number, ResponseDoc> | undefined;
+  security?: SecurityRequirement[] | undefined;
+  operationId?: string | undefined;
+  bodyContentType?: string | undefined;
+  files?: Record<string, FileField> | undefined;
+  // A schema-specific validation failure hook, which may answer a bad request
+  // with something other than the default 400
+  customValidationResponse?: boolean | undefined;
   hidden?: boolean | undefined;
   // Per status code: a JSON Schema inferred (and merged) from observed
   // responses, plus an optional real example (only in "live" mode).
@@ -1356,6 +1711,26 @@ function autoSummary(method: string, path: string): string {
   return `${prefix[method] ?? method} ${resource}`;
 }
 
+// A camelCase id from the method and the OpenAPI path, which together are
+// unique: GET /orders/{id} is getOrdersById, POST /v1/rp-clients is
+// postV1RpClients
+function autoOperationId(method: string, openApiPath: string): string {
+  const pascal = (text: string) =>
+    text
+      .split(/[^A-Za-z0-9]+/)
+      .filter(Boolean)
+      .map((word) => word[0]!.toUpperCase() + word.slice(1))
+      .join("");
+  const words = openApiPath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      const param = /^\{(.+)\}$/.exec(segment);
+      return param ? `By${pascal(param[1]!)}` : pascal(segment);
+    });
+  return method + words.join("");
+}
+
 async function trySchemaToJsonSchema(
   schema: AnyStandardSchema,
 ): Promise<Record<string, any>> {
@@ -1567,11 +1942,183 @@ function scalarHtml(title: string, specUrl: string, cdnUrl: string): string {
 </html>`;
 }
 
+// ─── $ref components ─────────────────────────────────────────────────────────
+// A named schema (Zod: .meta({ id: "Order" })) is defined once, in
+// components.schemas, and referenced everywhere it's used. Validators put the
+// named schemas nested in another under $defs (or the older `definitions`),
+// with refs like #/$defs/Order; those move to components and their refs are
+// repointed. A schema that's named itself becomes a $ref too.
+
+// Documented responses, one layer over another (the docs', a router's, a
+// route's): the nearer layer wins, but a description alone keeps the schema
+// from below, so rewording a response doesn't lose its body
+function layerResponses(
+  under: Record<number, ResponseDoc> | undefined,
+  over: Record<number, ResponseDoc> | undefined,
+): Record<number, ResponseDoc> | undefined {
+  if (!under || !over) return over ?? under;
+  const layered: Record<number, ResponseDoc> = { ...under };
+  for (const [code, doc] of Object.entries(over)) {
+    const below = under[Number(code)];
+    layered[Number(code)] =
+      typeof doc === "string" && typeof below === "object" && below.schema
+        ? { description: doc, schema: below.schema }
+        : doc;
+  }
+  return layered;
+}
+
+const COMPONENT_REF = "#/components/schemas/";
+const LOCAL_REF = /^#\/(\$defs|definitions)\//;
+
+// The name a schema was given, if any: in the docs' `schemas`, else Zod's
+// metadata id, else a plain $id
+function schemaName(
+  schema: AnyStandardSchema,
+  json: Record<string, any>,
+  named: WeakMap<object, string>,
+): string | undefined {
+  const given = named.get(schema as object);
+  if (given) return given;
+  if ((schema as any)["~standard"]?.vendor === "zod") {
+    try {
+      const id = (schema as any).meta?.()?.id;
+      if (typeof id === "string" && id) return id;
+    } catch {}
+  }
+  const $id = json.$id;
+  return typeof $id === "string" && /^[A-Za-z0-9._-]+$/.test($id) ? $id : undefined;
+}
+
+// The body of the default 400 (see defaultValidationHandler)
+const VALIDATION_ERROR_SCHEMA = {
+  type: "object",
+  description: "The request's body, query or params didn't match the route's schema",
+  properties: {
+    error: { type: "string", const: "Validation failed" },
+    details: {
+      type: "array",
+      description: "What was wrong, one entry per problem",
+      items: {
+        type: "object",
+        properties: {
+          message: { type: "string" },
+          path: {
+            type: "array",
+            description: "Where the problem is, e.g. [\"amount\"] or [\"items\", 0, \"id\"]",
+            items: {},
+          },
+        },
+        required: ["message"],
+      },
+    },
+  },
+  required: ["error", "details"],
+};
+
+class SchemaComponents {
+  readonly schemas: Record<string, Record<string, any>> = Object.create(null);
+
+  /** A JSON Schema (not a validator's schema) as a named component, as a $ref */
+  json(name: string, schema: Record<string, any>): Record<string, any> {
+    this.add(name, schema);
+    return { $ref: COMPONENT_REF + name };
+  }
+  // The docs' `schemas`, by the schema object itself
+  private readonly named = new WeakMap<object, string>();
+
+  constructor(named: Record<string, AnyStandardSchema> = {}) {
+    for (const [name, schema] of Object.entries(named)) this.named.set(schema as object, name);
+  }
+
+  /** Defines the docs' named schemas, used by a route or not */
+  async addNamed(named: Record<string, AnyStandardSchema> = {}): Promise<void> {
+    for (const schema of Object.values(named)) await this.ref(schema);
+  }
+
+  /** The schema as it goes in a request body or response: a $ref when it's named */
+  async ref(schema: AnyStandardSchema): Promise<Record<string, any>> {
+    const json = await trySchemaToJsonSchema(schema);
+    const name = schemaName(schema, json, this.named);
+    const inline = this.hoist(json, name);
+    if (!name || !Object.keys(inline).length) return inline;
+    this.add(name, inline);
+    return { $ref: COMPONENT_REF + name };
+  }
+
+  /** The schema written out, for reading its properties (path and query parameters) */
+  async inline(schema: AnyStandardSchema): Promise<Record<string, any>> {
+    const json = await trySchemaToJsonSchema(schema);
+    return this.hoist(json, schemaName(schema, json, this.named));
+  }
+
+  // Moves the schema's $defs into components and repoints refs to them. The
+  // converted schema is cached (and shared), so this works on a copy.
+  private hoist(json: Record<string, any>, name: string | undefined): Record<string, any> {
+    const { $schema: _, $id: __, $defs, definitions, ...rest } = structuredClone(json);
+    for (const [defName, def] of Object.entries({ ...definitions, ...$defs })) {
+      this.add(defName, this.hoist(def as Record<string, any>, defName));
+    }
+    return repointRefs(rest, name) as Record<string, any>;
+  }
+
+  private add(name: string, schema: Record<string, any>): void {
+    const existing = this.schemas[name];
+    if (!existing) {
+      this.schemas[name] = schema;
+    } else if (JSON.stringify(existing) !== JSON.stringify(schema)) {
+      console.warn(
+        `[express-typed-router] Two different schemas are both named "${name}"; the docs keep the first. Give each its own name.`,
+      );
+    }
+  }
+}
+
+// #/$defs/X becomes #/components/schemas/X; "#" (a schema referring to itself,
+// when it's recursive) becomes its own component when it has a name
+function repointRefs(node: unknown, selfName: string | undefined): unknown {
+  if (Array.isArray(node)) return node.map((item) => repointRefs(item, selfName));
+  if (!node || typeof node !== "object") return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "$ref" && typeof value === "string") {
+      if (LOCAL_REF.test(value)) out[key] = value.replace(LOCAL_REF, COMPONENT_REF);
+      else if (value === "#" && selfName) out[key] = COMPONENT_REF + selfName;
+      else out[key] = value;
+    } else {
+      out[key] = repointRefs(value, selfName);
+    }
+  }
+  return out;
+}
+
+// Every scheme a requirement names should be one the docs define
+function warnAboutUndefinedSchemes(
+  requirements: SecurityRequirement[] | undefined,
+  defined: Record<string, SecurityScheme> | undefined,
+  warned: Set<string>,
+): void {
+  for (const requirement of requirements ?? []) {
+    for (const scheme of Object.keys(requirement)) {
+      if (defined?.[scheme] || warned.has(scheme)) continue;
+      warned.add(scheme);
+      console.warn(
+        `[express-typed-router] "${scheme}" is required as security but isn't in the docs' securitySchemes, so the docs can't describe it.`,
+      );
+    }
+  }
+}
+
 async function buildOpenApiSpec(
   routes: RouteMetadata[],
   options: DocsOptions,
 ): Promise<Record<string, any>> {
   const paths: Record<string, any> = Object.create(null);
+  const components = new SchemaComponents(options.schemas);
+  const operationIds = new Set<string>();
+  await components.addNamed(options.schemas);
+  const warnedSchemes = new Set<string>();
+  warnAboutUndefinedSchemes(options.security, options.securitySchemes, warnedSchemes);
 
   for (const route of routes) {
     if (route.method === "all" || route.hidden) continue;
@@ -1582,7 +2129,7 @@ async function buildOpenApiSpec(
 
       let parameters: any[];
       if (route.paramsSchema) {
-        const ps = await trySchemaToJsonSchema(route.paramsSchema);
+        const ps = await components.inline(route.paramsSchema);
         const props: Record<string, any> = ps.properties ?? {};
         const required: string[] = ps.required ?? [];
         parameters = Object.entries(props).map(([name, propSchema]) => ({
@@ -1601,7 +2148,7 @@ async function buildOpenApiSpec(
       }
 
       if (route.querySchema) {
-        const qs = await trySchemaToJsonSchema(route.querySchema);
+        const qs = await components.inline(route.querySchema);
         const props: Record<string, any> = qs.properties ?? {};
         const required: string[] = qs.required ?? [];
         for (const [name, propSchema] of Object.entries(props)) {
@@ -1614,7 +2161,36 @@ async function buildOpenApiSpec(
         }
       }
 
+      // Unique, as client generators need: a duplicate (two routes given the
+      // same id, or one documented under several paths) gets a number
+      let operationId = route.operationId ?? autoOperationId(route.method, openApiPath);
+      if (operationIds.has(operationId)) {
+        if (route.operationId) {
+          console.warn(`[express-typed-router] operationId "${operationId}" is used more than once; the docs number the others.`);
+        }
+        let n = 2;
+        while (operationIds.has(`${operationId}${n}`)) n++;
+        operationId = `${operationId}${n}`;
+      }
+      operationIds.add(operationId);
+
+      if (route.headersSchema) {
+        const hs = await components.inline(route.headersSchema);
+        const required: string[] = hs.required ?? [];
+        for (const [name, propSchema] of Object.entries<Record<string, any>>(hs.properties ?? {})) {
+          const { description, ...schema } = propSchema;
+          parameters.push({
+            name,
+            in: "header",
+            required: required.includes(name),
+            ...(description ? { description } : {}),
+            schema,
+          });
+        }
+      }
+
       const operation: Record<string, any> = {
+        operationId,
         summary: route.summary ?? autoSummary(route.method, docPath),
         tags: route.tags ?? [autoTag(docPath)],
         parameters,
@@ -1622,12 +2198,35 @@ async function buildOpenApiSpec(
 
       if (route.description) operation.description = route.description;
       if (route.deprecated) operation.deprecated = true;
+      if (route.security) {
+        operation.security = route.security;
+        warnAboutUndefinedSchemes(route.security, options.securitySchemes, warnedSchemes);
+      }
 
-      if (route.bodySchema) {
-        const bs = await trySchemaToJsonSchema(route.bodySchema);
+      const fileFields = Object.entries(route.files ?? {});
+      if (route.bodySchema || fileFields.length) {
+        const contentType = route.bodyContentType ?? (fileFields.length ? "multipart/form-data" : "application/json");
+        let schema: Record<string, any>;
+        if (!fileFields.length) {
+          schema = route.bodySchema ? await components.ref(route.bodySchema) : {};
+        } else {
+          // The files beside the body's own fields, so it's written out, not a $ref
+          const fields = route.bodySchema ? await components.inline(route.bodySchema) : {};
+          const properties: Record<string, any> = { ...fields.properties };
+          const required: string[] = [...(fields.required ?? [])];
+          for (const [name, file] of fileFields) {
+            const binary = { type: "string", format: "binary" };
+            properties[name] = {
+              ...(file.multiple ? { type: "array", items: binary } : binary),
+              ...(file.description ? { description: file.description } : {}),
+            };
+            if (file.required) required.push(name);
+          }
+          schema = { ...fields, type: "object", properties, ...(required.length ? { required } : {}) };
+        }
         operation.requestBody = {
-          required: true,
-          content: { "application/json": { schema: bs } },
+          required: Boolean(route.bodySchema) || fileFields.some(([, file]) => file.required),
+          content: { [contentType]: { schema } },
         };
       }
 
@@ -1643,26 +2242,54 @@ async function buildOpenApiSpec(
       }
       // A declared responseSchema is the source of truth — it wins over inference
       // for the success response (no staleness, reflects current code exactly).
+      // Its status is the first success one documented in `responses` (a 201,
+      // say), else the first seen in traffic, else 200.
+      const documented = Object.entries(layerResponses(options.responses, route.responses) ?? {});
       if (route.responseSchema) {
-        const declared = await trySchemaToJsonSchema(route.responseSchema);
+        const declared = await components.ref(route.responseSchema);
         if (declared && Object.keys(declared).length) {
-          let successStatus = "200";
-          for (const code of route.responseSamples.keys()) {
-            if (code >= 200 && code < 300) {
-              successStatus = String(code);
-              break;
-            }
-          }
-          responses[successStatus] = {
+          const isSuccess = (code: number) => code >= 200 && code < 300;
+          const successStatus =
+            documented.map(([code]) => Number(code)).find(isSuccess) ??
+            [...route.responseSamples.keys()].find(isSuccess) ??
+            200;
+          responses[String(successStatus)] = {
             description: "Success",
             content: { "application/json": { schema: declared } },
           };
         }
       }
-      if (Object.keys(responses).length === 0) {
+      // Documented responses: their descriptions win, and so do their schemas;
+      // without one, whatever schema the status already has stays
+      for (const [code, doc] of documented) {
+        const { description, schema, contentType } =
+          typeof doc === "string" ? { description: doc, schema: undefined, contentType: undefined } : doc;
+        const response: Record<string, any> = { ...responses[code], description };
+        if (schema) {
+          const json = await components.ref(schema);
+          if (Object.keys(json).length) response.content = { [contentType ?? "application/json"]: { schema: json } };
+        } else if (contentType) {
+          response.content = { [contentType]: {} };
+        }
+        responses[code] = response;
+      }
+      // A route that validates its input can answer 400 with the library's own body
+      const validatesInput = route.bodySchema || route.querySchema || route.paramsSchema;
+      if (validatesInput && options.documentValidationErrors !== false && !responses["400"]) {
+        responses["400"] = route.customValidationResponse
+          ? { description: "The request failed validation" }
+          : {
+              description: "The request failed validation",
+              content: { "application/json": { schema: components.json("ValidationError", VALIDATION_ERROR_SCHEMA) } },
+            };
+      }
+      if (!Object.keys(responses).some((code) => Number(code) < 400)) {
         responses["200"] = { description: "Success" };
       }
-      operation.responses = responses;
+      // In status order, however they were added
+      operation.responses = Object.fromEntries(
+        Object.entries(responses).sort(([a], [b]) => Number(a) - Number(b)),
+      );
 
       paths[openApiPath][route.method] = operation;
     }
@@ -1676,7 +2303,18 @@ async function buildOpenApiSpec(
       ...(options.description ? { description: options.description } : {}),
     },
     ...(options.servers ? { servers: options.servers } : {}),
+    ...(options.security ? { security: options.security } : {}),
+    ...(options.tags?.length ? { tags: options.tags } : {}),
+    ...(options.tagGroups?.length ? { "x-tagGroups": options.tagGroups } : {}),
     paths,
+    ...(Object.keys(components.schemas).length || options.securitySchemes
+      ? {
+          components: {
+            ...(Object.keys(components.schemas).length ? { schemas: components.schemas } : {}),
+            ...(options.securitySchemes ? { securitySchemes: options.securitySchemes } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -1714,6 +2352,8 @@ export type AdditionalLocals = {};
 export class TypedRouter<
   Req extends Record<string, any> = AdditionalReqProps,
   Locals extends Record<string, any> = AdditionalLocals,
+  // The responses .responses() documents, which type res.json() in its routes
+  RouterResponses extends Record<number, ResponseDoc> | undefined = undefined,
 > {
   private router: express.Router;
   private routes: RouteMetadata[] = [];
@@ -1734,6 +2374,13 @@ export class TypedRouter<
   // sub-routers mounted with .mount()/.use(). Pass the same hook to each
   // router's config if you want it shared across all of them.
   private globalValidationFailureHook?: ValidationFailureHook<Req> | undefined;
+  // The security its routes need in the docs, unless a route says otherwise.
+  // Set via .security() or createTypedRouterWithConfig({ security }).
+  private defaultSecurity?: SecurityRequirement[] | undefined;
+  // Read at request time, so it can be set after routes are registered
+  private responseValidationMode: ResponseValidation = "off";
+  // Responses its routes can give, unless a route documents that status itself
+  private defaultResponses?: Record<number, ResponseDoc> | undefined;
 
   constructor() {
     this.router = express.Router();
@@ -1751,9 +2398,51 @@ export class TypedRouter<
    *   logger.warn(info, 'request validation failed');
    * });
    */
-  onValidationFailure(hook: ValidationFailureHook<Req>): TypedRouter<Req, Locals> {
+  onValidationFailure(hook: ValidationFailureHook<Req>): TypedRouter<Req, Locals, RouterResponses> {
     this.globalValidationFailureHook = hook;
     return this;
+  }
+  /**
+   * The security this router's routes need in the docs, by the names in
+   * {@link DocsOptions.securitySchemes}: typically what its auth middleware
+   * enforces. Covers routes on routers mounted under it too, unless they set
+   * their own; a route's own `security` wins over both. Documentation only.
+   *
+   * @example
+   * const partnerApi = createTypedRouter()
+   *   .useMiddleware(requireApiKey)
+   *   .security([{ apiKey: [] }]);
+   */
+  security(requirements: SecurityRequirement[]): TypedRouter<Req, Locals, RouterResponses> {
+    this.defaultSecurity = requirements;
+    return this;
+  }
+  /**
+   * Whether bodies sent by this router's routes are checked against their
+   * response schemas; a route's own `responseValidation` wins. See
+   * {@link ResponseValidation}.
+   */
+  responseValidation(mode: ResponseValidation): TypedRouter<Req, Locals, RouterResponses> {
+    this.responseValidationMode = mode;
+    return this;
+  }
+  /**
+   * Responses this router's routes can give, by status: typically what its
+   * middleware answers (a 401 without a key) or its error handler (a 500).
+   * Covers routers mounted under it too; a route's own `responses` win for
+   * the statuses they document. Their schemas type res.json() in this
+   * router's routes (registered after this call, so call it first), and count
+   * for responseValidation on them.
+   *
+   * @example
+   * const api = createTypedRouter().responses({
+   *   401: { description: "No valid API key", schema: ApiError },
+   *   500: { description: "Something went wrong", schema: ApiError },
+   * });
+   */
+  responses<Responses extends Record<number, ResponseDoc>>(responses: Responses): TypedRouter<Req, Locals, Responses> {
+    this.defaultResponses = responses;
+    return this as unknown as TypedRouter<Req, Locals, Responses>;
   }
   /**
    * Add typed middleware that extends the request with additional properties
@@ -1772,7 +2461,7 @@ export class TypedRouter<
     TLocals extends Record<string, any> = {},
   >(
     middleware: TypedMiddleware<TReq, TLocals>,
-  ): TypedRouter<Req & TReq, Locals & TLocals> {
+  ): TypedRouter<Req & TReq, Locals & TLocals, RouterResponses> {
     this.router.use(middleware as any);
     return this as any;
   }
@@ -1806,12 +2495,12 @@ export class TypedRouter<
     ...handlers: Array<
       express.RequestHandler | express.Router | TypedRouter<any, any>
     >
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   use(
     ...handlers: Array<
       express.RequestHandler | express.Router | TypedRouter<any, any>
     >
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   use(
     pathOrHandler:
       | string
@@ -1821,7 +2510,7 @@ export class TypedRouter<
     ...rest: Array<
       express.RequestHandler | express.Router | TypedRouter<any, any>
     >
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     const isPath = typeof pathOrHandler === "string";
     const prefix = isPath ? (pathOrHandler as string) : "";
     const rawHandlers = isPath
@@ -1873,12 +2562,12 @@ export class TypedRouter<
   mount(
     prefix: string,
     router: TypedRouter<any, any>,
-  ): TypedRouter<Req, Locals>;
-  mount(router: TypedRouter<any, any>): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
+  mount(router: TypedRouter<any, any>): TypedRouter<Req, Locals, RouterResponses>;
   mount(
     prefixOrRouter: string | TypedRouter<any, any>,
     maybeRouter?: TypedRouter<any, any>,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     if (typeof prefixOrRouter === "string") {
       const sub = maybeRouter!;
       this.router.use(prefixOrRouter, sub.getRouter());
@@ -1909,7 +2598,16 @@ export class TypedRouter<
             }),
       })),
     );
-    return [...this.routes, ...mounted];
+    const all = [...this.routes, ...mounted];
+    // This router's defaults cover whatever doesn't set its own, so the nearest
+    // setting wins: the route's, then its router's, then a parent's.
+    const { defaultSecurity, defaultResponses } = this;
+    if (!defaultSecurity && !defaultResponses) return all;
+    return all.map((meta) => ({
+      ...meta,
+      ...(defaultSecurity && meta.security === undefined ? { security: defaultSecurity } : {}),
+      ...(defaultResponses ? { responses: layerResponses(defaultResponses, meta.responses) } : {}),
+    }));
   }
 
   /**
@@ -2098,8 +2796,8 @@ export class TypedRouter<
   // Method overloads for GET requests with automatic middleware type inference
   get<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
 
   // Body/query schema and middleware live as flat sibling properties (not
   // intersected with a separately-generic options type) so TS can infer
@@ -2109,6 +2807,9 @@ export class TypedRouter<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2116,6 +2817,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2126,19 +2831,25 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   // RegExp path — Express doesn't expose named params for a raw RegExp, so
   // params always type as Record<string, string>.
   get(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   get<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2146,6 +2857,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2156,26 +2871,32 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   // Implementation
   get(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("get", path, optionsOrHandler, handler);
   } // Combined overload for body/query schema + middleware (most specific first)
   post<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2183,6 +2904,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2193,17 +2918,23 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2211,6 +2942,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2221,27 +2956,33 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   post(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("post", path, optionsOrHandler, handler);
   }
 
   // PUT method: same overload shape as POST
   put<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2249,6 +2990,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2259,17 +3004,23 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2277,6 +3028,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2287,27 +3042,33 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   put(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("put", path, optionsOrHandler, handler);
   }
 
   // PATCH method: same overload shape as POST
   patch<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2315,6 +3076,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2325,17 +3090,23 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2343,6 +3114,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2353,32 +3128,42 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   patch(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("patch", path, optionsOrHandler, handler);
   }
 
   // DELETE method: no bodySchema (typically no body)
   delete<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2389,22 +3174,32 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2415,32 +3210,42 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   delete(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("delete", path, optionsOrHandler, handler);
   }
 
   // OPTIONS method: no bodySchema (typically used for CORS preflight)
   options<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2451,22 +3256,32 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2477,32 +3292,42 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   options(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("options", path, optionsOrHandler, handler);
   }
 
   // HEAD method: no bodySchema (like GET but only returns headers)
   head<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head<
     Path extends string,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2513,22 +3338,32 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head<
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
     options: DocMeta & {
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2539,27 +3374,33 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   head(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("head", path, optionsOrHandler, handler);
   }
 
   // ALL method: same overload shape as POST (matches every HTTP method)
   all<Path extends string>(
     path: Path,
-    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<Path, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all<
     Path extends string,
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: Path,
@@ -2567,6 +3408,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2577,17 +3422,23 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all(
     path: RegExp,
-    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals>,
-  ): TypedRouter<Req, Locals>;
+    handler: SchemaRouteHandler<string, undefined, undefined, Req, Locals, undefined, undefined, undefined, RouterResponses>,
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all<
     BodySchema extends SchemaLike | undefined = undefined,
     QuerySchema extends SchemaLike | undefined = undefined,
     ParamsSchema extends SchemaLike | undefined = undefined,
+    ResponseSchema extends AnyStandardSchema | undefined = undefined,
+    Responses extends Record<number, ResponseDoc> | undefined = undefined,
+    HeadersSchema extends SchemaLike | undefined = undefined,
     M extends TypedMiddleware<any, any>[] = [],
   >(
     path: RegExp,
@@ -2595,6 +3446,10 @@ export class TypedRouter<
       bodySchema?: BodySchema;
       querySchema?: QuerySchema;
       paramsSchema?: ParamsSchema;
+      headersSchema?: HeadersSchema;
+      responseSchema?: ResponseSchema;
+      responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2605,14 +3460,17 @@ export class TypedRouter<
       ParamsSchema,
       Req,
       Locals,
-      M
+      M,
+      ResponseSchema,
+      LayerResponses<RouterResponses, Responses>,
+      HeadersSchema
     >,
-  ): TypedRouter<Req, Locals>;
+  ): TypedRouter<Req, Locals, RouterResponses>;
   all(
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     return this.registerRoute("all", path, optionsOrHandler, handler);
   }
   // Helper method to register routes
@@ -2621,7 +3479,7 @@ export class TypedRouter<
     path: string | RegExp,
     optionsOrHandler: any,
     handler?: any,
-  ): TypedRouter<Req, Locals> {
+  ): TypedRouter<Req, Locals, RouterResponses> {
     const middlewares: any[] = [];
     const meta: RouteMetadata = { method, path, responseSamples: new Map() };
     this.routes.push(meta);
@@ -2632,13 +3490,26 @@ export class TypedRouter<
       meta.bodySchema = options.bodySchema as AnyStandardSchema | undefined;
       meta.querySchema = options.querySchema as AnyStandardSchema | undefined;
       meta.paramsSchema = options.paramsSchema as AnyStandardSchema | undefined;
-      meta.tags = options.tags;
-      meta.description = options.description;
-      meta.summary = options.summary;
-      meta.deprecated = options.deprecated;
+      meta.headersSchema = options.headersSchema as AnyStandardSchema | undefined;
+      // `docs` wins over the deprecated flat fields
+      const docs = options.docs ?? {};
+      meta.tags = docs.tags ?? options.tags;
+      meta.description = docs.description ?? options.description;
+      meta.summary = docs.summary ?? options.summary;
+      meta.deprecated = docs.deprecated ?? options.deprecated;
       meta.responseSchema = options.responseSchema;
-      meta.hidden = options.hidden;
-      meta.pathExample = options.pathExample;
+      meta.responses = options.responses;
+      meta.security = docs.security;
+      meta.operationId = docs.operationId;
+      meta.bodyContentType = docs.bodyContentType;
+      meta.files = docs.files;
+      meta.customValidationResponse = Boolean(
+        options.hooks?.onBodyValidationFailure ||
+          options.hooks?.onQueryValidationFailure ||
+          options.hooks?.onParamsValidationFailure,
+      );
+      meta.hidden = docs.hidden ?? options.hidden;
+      meta.pathExample = docs.pathExample ?? options.pathExample;
 
       if (options.middleware) {
         middlewares.push(...options.middleware);
@@ -2661,7 +3532,7 @@ export class TypedRouter<
             options.bodySchema,
             method,
             path,
-            options.pathExample,
+            meta.pathExample,
             onValidationFailure,
             onBodyValidationFailure,
           ),
@@ -2673,7 +3544,7 @@ export class TypedRouter<
             options.querySchema,
             method,
             path,
-            options.pathExample,
+            meta.pathExample,
             onValidationFailure,
             onQueryValidationFailure,
           ),
@@ -2685,12 +3556,20 @@ export class TypedRouter<
             options.paramsSchema,
             method,
             path,
-            options.pathExample,
+            meta.pathExample,
             onValidationFailure,
             onParamsValidationFailure,
           ),
         );
       }
+      if (options.headersSchema) {
+        middlewares.push(
+          this.createHeadersValidationMiddleware(options.headersSchema, method, path, meta.pathExample, onValidationFailure),
+        );
+      }
+      // Cheap when the mode is "off": it reads it at request time, as the
+      // router's response schemas may be set after the route
+      middlewares.push(this.createResponseValidationMiddleware(options, method, path));
       middlewares.push(handler);
     } else {
       middlewares.push(optionsOrHandler);
@@ -2771,6 +3650,91 @@ export class TypedRouter<
 
     return this;
   }
+  // Validates req.headers, merging the parsed values over it: a Zod-style
+  // object drops keys it doesn't declare, and the rest must stay
+  private createHeadersValidationMiddleware(
+    schema: any,
+    method: HttpMethod,
+    path: string | RegExp,
+    pathExample: string | string[] | undefined,
+    onValidationFailure: ValidationFailureHook | undefined,
+  ) {
+    return async (req: Request, res: Response, next: NextFunction) => {
+      const fail = (details: any[]) => {
+        this.notifyValidationFailure("headers", "Validation failed", details, method, resolveDocPath({ path, pathExample }), req, onValidationFailure);
+        defaultValidationHandler({ res, details });
+      };
+      try {
+        const result = safeParseSchema(schema, req.headers) as any;
+        const resolved = result && typeof result.then === "function" ? await result : result;
+        if (resolved && "issues" in resolved && resolved.issues) return fail(resolved.issues);
+        const parsed = resolved && "value" in resolved ? resolved.value : resolved;
+        if (parsed && typeof parsed === "object") Object.assign(req.headers, parsed);
+        next();
+      } catch (error) {
+        if (isSchemaError(error)) fail((error as any).errors || (error as any).issues);
+        else next(error);
+      }
+    };
+  }
+
+  // Runs each JSON body through the schema for its status (see
+  // ResponseValidation). Wraps res.json, which res.send(object) also goes
+  // through in Express, after the sampler, so samples see what was sent.
+  private createResponseValidationMiddleware(
+    options: RouteOptions<any, any, any>,
+    method: HttpMethod,
+    path: string | RegExp,
+  ) {
+    const route = `${method.toUpperCase()} ${path.toString()}`;
+    const warned = new Set<number>();
+    const schemaFor = (status: number): AnyStandardSchema | undefined => {
+      const doc = layerResponses(this.defaultResponses, options.responses)?.[status];
+      if (typeof doc === "object" && doc.schema) return doc.schema;
+      return status >= 200 && status < 300 ? options.responseSchema : undefined;
+    };
+
+    return (_req: Request, res: Response, next: NextFunction) => {
+      const mode = options.responseValidation ?? this.responseValidationMode;
+      if (mode === "off") return next();
+
+      const originalJson = res.json;
+      const send = (body: unknown) => originalJson.call(res, body);
+      const onMismatch = (status: number, body: unknown, issues: readonly any[]) => {
+        const summary = issues
+          .slice(0, 3)
+          .map((issue) => `${(issue.path ?? []).map((p: any) => p?.key ?? p).join(".") || "(body)"}: ${issue.message}`)
+          .join("; ");
+        if (mode === "strict") {
+          console.error(`[express-typed-router] ${route} sent a ${status} body its schema doesn't match: ${summary}`);
+          res.status(500);
+          return send({ error: "The response didn't match its schema" });
+        }
+        if (!warned.has(status)) {
+          warned.add(status);
+          console.warn(`[express-typed-router] ${route} sent a ${status} body its schema doesn't match, so it was sent unstripped: ${summary}`);
+        }
+        return send(body);
+      };
+
+      res.json = function (body: any) {
+        const status = res.statusCode;
+        const schema = schemaFor(status);
+        if (!schema) return send(body);
+        const result = schema["~standard"].validate(body);
+        if (result instanceof Promise) {
+          result.then(
+            (r) => (r.issues ? onMismatch(status, body, r.issues) : send(r.value)),
+            (err) => onMismatch(status, body, [{ message: String(err) }]),
+          );
+          return res;
+        }
+        return result.issues ? onMismatch(status, body, result.issues) : send(result.value);
+      };
+      next();
+    };
+  }
+
   // Fires the route's hook then the global one, both fire-and-forget observers.
   private notifyValidationFailure(
     source: ValidationFailureSource,
@@ -3088,7 +4052,10 @@ export function createTypedRouter<
  * @property errorHandler - Optional global error handler middleware for the router.
  * @property hooks.onValidationFailure - Called for every validation failure on this router, in addition to any per-route hook.
  */
-export interface RouterConfig<Req extends Record<string, any> = {}> {
+export interface RouterConfig<
+  Req extends Record<string, any> = {},
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
+> {
   validateInput?: boolean;
   errorHandler?: (
     error: any,
@@ -3097,6 +4064,17 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
     next: NextFunction,
   ) => void;
   hooks?: RouterHooks<Req>;
+  /** The security this router's routes need in the docs; see {@link TypedRouter.security}. */
+  security?: SecurityRequirement[];
+  /** Responses this router's routes can give; see {@link TypedRouter.responses}. */
+  responses?: Responses;
+  /**
+   * Whether bodies sent by this router's routes are checked against their
+   * response schemas (see {@link ResponseValidation}); a route's own setting
+   * wins. Like the validation hooks, it covers routes registered directly on
+   * this router, not routers mounted under it.
+   */
+  responseValidation?: ResponseValidation;
 }
 
 /**
@@ -3119,13 +4097,23 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
 export function createTypedRouterWithConfig<
   Req extends Record<string, any> = AdditionalReqProps,
   Locals extends Record<string, any> = AdditionalLocals,
->(config?: RouterConfig<Req>): TypedRouter<Req, Locals> {
-  const router = new TypedRouter<Req, Locals>();
+  Responses extends Record<number, ResponseDoc> | undefined = undefined,
+>(config?: RouterConfig<Req, Responses>): TypedRouter<Req, Locals, Responses> {
+  const router = new TypedRouter<Req, Locals, Responses>();
   if (config?.errorHandler) {
     router.getRouter().use(config.errorHandler);
   }
   if (config?.hooks?.onValidationFailure) {
     router.onValidationFailure(config.hooks.onValidationFailure);
+  }
+  if (config?.security) {
+    router.security(config.security);
+  }
+  if (config?.responses) {
+    router.responses(config.responses);
+  }
+  if (config?.responseValidation) {
+    router.responseValidation(config.responseValidation);
   }
   return router;
 }
