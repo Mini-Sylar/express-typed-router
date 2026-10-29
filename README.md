@@ -616,9 +616,11 @@ A schema says what a response *should* contain; `responseValidation` makes
 sure that's all it contains. Set it on a router (or a route):
 
 ```ts
-const api = createTypedRouterWithConfig({
-  responseValidation: process.env.NODE_ENV === "production" ? "strip" : "strict",
-});
+const api = createTypedRouter().responseValidation(
+  process.env.NODE_ENV === "production" ? "strip" : "strict",
+);
+// or createTypedRouterWithConfig({ responseValidation: ... }), as with
+// .security() and .responses()
 
 api.get("/users/:id", { responseSchema: User }, async (req, res) => {
   res.json(await db.findUser(req.params.id)); // passwordHash isn't in User, so it isn't sent
