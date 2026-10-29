@@ -1,3 +1,9 @@
+## [1.10.2](https://github.com/Mini-Sylar/express-typed-router/compare/v1.10.1...v1.10.2) (2026-10-29)
+
+### Bug Fixes
+
+* **docs:** document the validation 400 beside a route's own 400 ([11c43e7](https://github.com/Mini-Sylar/express-typed-router/commit/11c43e7c3eafcabf6d438fade7d16a8206c277a5))
+
 ## [1.10.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.10.0...v1.10.1) (2026-10-29)
 
 ### Bug Fixes
