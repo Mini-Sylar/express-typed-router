@@ -561,13 +561,14 @@ from below, so a route can reword a response without losing its body. A
 router's schemas type `res.json()` in every route on it (call
 `.responses()` before adding routes), and count for `responseValidation`.
 
-A route with a `bodySchema`, `querySchema` or `paramsSchema` gets its 400
-documented for you: the body the library sends when validation fails
-(`{ error: "Validation failed", details: [...] }`), as a shared
-`ValidationError` schema. Document your own 400 to replace it, or turn it
-off with `documentValidationErrors: false`. A route whose
-`onBodyValidationFailure` (or query/params) hook can send something else gets
-the description only.
+A route with a `bodySchema`, `querySchema`, `paramsSchema` or `headersSchema`
+gets its 400 documented for you: the body the library sends when validation
+fails (`{ error: "Validation failed", details: [...] }`), as a shared
+`ValidationError` schema. A 400 you document yourself (a business rule
+broken, say) is documented beside it, as either one (`anyOf`), since the route
+can still answer with either. Turn it off with
+`documentValidationErrors: false`. A route whose `onBodyValidationFailure` (or
+query/params) hook can send something else gets the description only.
 
 ### Request headers
 
