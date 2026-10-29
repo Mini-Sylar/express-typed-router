@@ -986,6 +986,8 @@ export interface RouteOptions<
    * }
    */
   responses?: Record<number, ResponseDoc>;
+  /** Whether bodies sent are checked against their schema; wins over the router's. See {@link ResponseValidation}. */
+  responseValidation?: ResponseValidation;
   /**
    * The security this route needs, by the names in
    * {@link DocsOptions.securitySchemes}. Wins over its router's and the docs'
@@ -1157,6 +1159,22 @@ export type SecurityScheme = { description?: string } & (
  * []                                  // nothing: a public route
  */
 export type SecurityRequirement = Record<string, string[]>;
+
+/**
+ * What happens to a body sent with a status that has a response schema
+ * (`responseSchema` for success, or one in `responses`):
+ *
+ * - `"off"` (the default): nothing; the schemas only document and type it
+ * - `"strip"`: a body that matches is sent as the schema outputs it, so fields
+ *   it doesn't declare (an internal id, a password hash) never leave. One that
+ *   doesn't match is sent as it is, with a warning
+ * - `"strict"`: as `"strip"`, but a body that doesn't match is a 500 instead,
+ *   so a schema and its handler drifting apart is noticed at once
+ *
+ * @example
+ * responseValidation: process.env.NODE_ENV === "production" ? "strip" : "strict"
+ */
+export type ResponseValidation = "off" | "strip" | "strict";
 
 /**
  * A response to document, for {@link RouteOptions.responses}: its description,
@@ -2058,6 +2076,8 @@ export class TypedRouter<
   // The security its routes need in the docs, unless a route says otherwise.
   // Set via .security() or createTypedRouterWithConfig({ security }).
   private defaultSecurity?: SecurityRequirement[] | undefined;
+  // Read at request time, so it can be set after routes are registered
+  private responseValidationMode: ResponseValidation = "off";
 
   constructor() {
     this.router = express.Router();
@@ -2092,6 +2112,15 @@ export class TypedRouter<
    */
   security(requirements: SecurityRequirement[]): TypedRouter<Req, Locals> {
     this.defaultSecurity = requirements;
+    return this;
+  }
+  /**
+   * Whether bodies sent by this router's routes are checked against their
+   * response schemas; a route's own `responseValidation` wins. See
+   * {@link ResponseValidation}.
+   */
+  responseValidation(mode: ResponseValidation): TypedRouter<Req, Locals> {
+    this.responseValidationMode = mode;
     return this;
   }
   /**
@@ -2466,6 +2495,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2502,6 +2532,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2545,6 +2576,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2579,6 +2611,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2623,6 +2656,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2657,6 +2691,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2701,6 +2736,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2735,6 +2771,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2777,6 +2814,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2809,6 +2847,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2851,6 +2890,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2883,6 +2923,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2925,6 +2966,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -2957,6 +2999,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<undefined, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -3001,6 +3044,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -3035,6 +3079,7 @@ export class TypedRouter<
       paramsSchema?: ParamsSchema;
       responseSchema?: ResponseSchema;
       responses?: Responses;
+      responseValidation?: ResponseValidation;
       hooks?: RouteHooks<BodySchema, QuerySchema, ParamsSchema, InferMiddlewareProps<[...M]>>;
       middleware?: [...M];
     },
@@ -3135,6 +3180,12 @@ export class TypedRouter<
           ),
         );
       }
+      const hasResponseSchemas =
+        options.responseSchema !== undefined ||
+        Object.values(options.responses ?? {}).some((doc) => typeof doc === "object" && doc.schema);
+      if (hasResponseSchemas) {
+        middlewares.push(this.createResponseValidationMiddleware(options, method, path));
+      }
       middlewares.push(handler);
     } else {
       middlewares.push(optionsOrHandler);
@@ -3215,6 +3266,63 @@ export class TypedRouter<
 
     return this;
   }
+  // Runs each JSON body through the schema for its status (see
+  // ResponseValidation). Wraps res.json, which res.send(object) also goes
+  // through in Express, after the sampler, so samples see what was sent.
+  private createResponseValidationMiddleware(
+    options: RouteOptions<any, any, any>,
+    method: HttpMethod,
+    path: string | RegExp,
+  ) {
+    const route = `${method.toUpperCase()} ${path.toString()}`;
+    const warned = new Set<number>();
+    const schemaFor = (status: number): AnyStandardSchema | undefined => {
+      const doc = options.responses?.[status];
+      if (typeof doc === "object" && doc.schema) return doc.schema;
+      return status >= 200 && status < 300 ? options.responseSchema : undefined;
+    };
+
+    return (_req: Request, res: Response, next: NextFunction) => {
+      const mode = options.responseValidation ?? this.responseValidationMode;
+      if (mode === "off") return next();
+
+      const originalJson = res.json;
+      const send = (body: unknown) => originalJson.call(res, body);
+      const onMismatch = (status: number, body: unknown, issues: readonly any[]) => {
+        const summary = issues
+          .slice(0, 3)
+          .map((issue) => `${(issue.path ?? []).map((p: any) => p?.key ?? p).join(".") || "(body)"}: ${issue.message}`)
+          .join("; ");
+        if (mode === "strict") {
+          console.error(`[express-typed-router] ${route} sent a ${status} body its schema doesn't match: ${summary}`);
+          res.status(500);
+          return send({ error: "The response didn't match its schema" });
+        }
+        if (!warned.has(status)) {
+          warned.add(status);
+          console.warn(`[express-typed-router] ${route} sent a ${status} body its schema doesn't match, so it was sent unstripped: ${summary}`);
+        }
+        return send(body);
+      };
+
+      res.json = function (body: any) {
+        const status = res.statusCode;
+        const schema = schemaFor(status);
+        if (!schema) return send(body);
+        const result = schema["~standard"].validate(body);
+        if (result instanceof Promise) {
+          result.then(
+            (r) => (r.issues ? onMismatch(status, body, r.issues) : send(r.value)),
+            (err) => onMismatch(status, body, [{ message: String(err) }]),
+          );
+          return res;
+        }
+        return result.issues ? onMismatch(status, body, result.issues) : send(result.value);
+      };
+      next();
+    };
+  }
+
   // Fires the route's hook then the global one, both fire-and-forget observers.
   private notifyValidationFailure(
     source: ValidationFailureSource,
@@ -3543,6 +3651,13 @@ export interface RouterConfig<Req extends Record<string, any> = {}> {
   hooks?: RouterHooks<Req>;
   /** The security this router's routes need in the docs; see {@link TypedRouter.security}. */
   security?: SecurityRequirement[];
+  /**
+   * Whether bodies sent by this router's routes are checked against their
+   * response schemas (see {@link ResponseValidation}); a route's own setting
+   * wins. Like the validation hooks, it covers routes registered directly on
+   * this router, not routers mounted under it.
+   */
+  responseValidation?: ResponseValidation;
 }
 
 /**
@@ -3575,6 +3690,9 @@ export function createTypedRouterWithConfig<
   }
   if (config?.security) {
     router.security(config.security);
+  }
+  if (config?.responseValidation) {
+    router.responseValidation(config.responseValidation);
   }
   return router;
 }

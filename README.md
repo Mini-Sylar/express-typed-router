@@ -516,6 +516,45 @@ else 200. A schema in `responses` wins over one inferred from traffic;
 without one, an inferred schema for that status is kept under your
 description.
 
+### Typed responses
+
+With a `responseSchema`, or schemas in `responses`, `res.json()` is typed by
+status: `res.json()` and `res.status(201).json()` take the success schema's
+input, `res.status(404).json()` the schema documented for 404, and a status
+with no schema stays untyped, as Express has it.
+
+```ts
+router.post("/orders", { responseSchema: Order, responses: { 400: { description: "Invalid", schema: ApiError } } }, (req, res) => {
+  res.status(400).json({ error: "Send an amount" }); // must be an ApiError
+  res.status(201).json(order); // must be an Order
+});
+```
+
+### Keeping responses to their schema
+
+A schema says what a response *should* contain; `responseValidation` makes
+sure that's all it contains. Set it on a router (or a route):
+
+```ts
+const api = createTypedRouterWithConfig({
+  responseValidation: process.env.NODE_ENV === "production" ? "strip" : "strict",
+});
+
+api.get("/users/:id", { responseSchema: User }, async (req, res) => {
+  res.json(await db.findUser(req.params.id)); // passwordHash isn't in User, so it isn't sent
+});
+```
+
+- `"strip"`: a body that matches is sent as the schema outputs it, so fields
+  it doesn't declare never leave. One that doesn't match is sent unchanged,
+  with a warning
+- `"strict"`: the same, but a body that doesn't match is a 500, so a handler
+  drifting from its schema is caught in development and tests
+- `"off"` (the default): schemas only document and type responses
+
+It applies to each status that has a schema, and to JSON bodies (`res.json`,
+and `res.send` with an object).
+
 ### Shared schemas (`$ref`)
 
 A schema with a name is defined once, under `components.schemas`, and every
@@ -916,6 +955,7 @@ Use a schema that actually parses the text:
 | `router.useMiddleware(mw)`               | Add typed global middleware (returns new router) |
 | `router.onValidationFailure(hook)`       | Set the global validation failure hook (returns same router) |
 | `router.security(requirements)`          | The security this router's routes need in the docs (returns same router) |
+| `router.responseValidation(mode)`        | Check bodies sent against their response schema: `"strip"`, `"strict"` or `"off"` (returns same router) |
 | `router.use(prefix, subRouter)`          | Mount a sub-router                               |
 | `router.getRouter()`                     | Get the underlying Express router                |
 | `router.docs(options)`                   | Get the docs + OpenAPI spec router               |
