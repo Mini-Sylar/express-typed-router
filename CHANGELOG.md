@@ -1,3 +1,9 @@
+## [1.10.1](https://github.com/Mini-Sylar/express-typed-router/compare/v1.10.0...v1.10.1) (2026-10-29)
+
+### Bug Fixes
+
+* **docs:** describe Zod dates and transforms, requests as they go in, and work with Zod 4.6 ([d722eba](https://github.com/Mini-Sylar/express-typed-router/commit/d722eba32c9c79cccc7b4b1efc4e7dc9b5da3c77))
+
 ## [1.10.0](https://github.com/Mini-Sylar/express-typed-router/compare/v1.9.10...v1.10.0) (2026-10-29)
 
 ### Features
