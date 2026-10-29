@@ -989,6 +989,13 @@ export interface RouteOptions<
   /** Whether bodies sent are checked against their schema; wins over the router's. See {@link ResponseValidation}. */
   responseValidation?: ResponseValidation;
   /**
+   * The operation's id, which client generators name its method after.
+   * Generated from the method and path when not set (GET /orders/:id is
+   * getOrdersById); set one for a friendlier name, e.g. "getOrder". It must
+   * be unique across the API.
+   */
+  operationId?: string;
+  /**
    * The security this route needs, by the names in
    * {@link DocsOptions.securitySchemes}. Wins over its router's and the docs'
    * defaults; `[]` marks it as needing none (say, a sign-in route under an
@@ -1097,6 +1104,7 @@ type DocMeta = Pick<
   | "description"
   | "deprecated"
   | "security"
+  | "operationId"
   | "hidden"
   | "pathExample"
 >;
@@ -1296,6 +1304,7 @@ interface RouteMetadata {
   responseSchema?: AnyStandardSchema | undefined;
   responses?: Record<number, ResponseDoc> | undefined;
   security?: SecurityRequirement[] | undefined;
+  operationId?: string | undefined;
   // A schema-specific validation failure hook, which may answer a bad request
   // with something other than the default 400
   customValidationResponse?: boolean | undefined;
@@ -1566,6 +1575,26 @@ function autoSummary(method: string, path: string): string {
     options: "Options",
   };
   return `${prefix[method] ?? method} ${resource}`;
+}
+
+// A camelCase id from the method and the OpenAPI path, which together are
+// unique: GET /orders/{id} is getOrdersById, POST /v1/rp-clients is
+// postV1RpClients
+function autoOperationId(method: string, openApiPath: string): string {
+  const pascal = (text: string) =>
+    text
+      .split(/[^A-Za-z0-9]+/)
+      .filter(Boolean)
+      .map((word) => word[0]!.toUpperCase() + word.slice(1))
+      .join("");
+  const words = openApiPath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      const param = /^\{(.+)\}$/.exec(segment);
+      return param ? `By${pascal(param[1]!)}` : pascal(segment);
+    });
+  return method + words.join("");
 }
 
 async function trySchemaToJsonSchema(
@@ -1952,6 +1981,7 @@ async function buildOpenApiSpec(
 ): Promise<Record<string, any>> {
   const paths: Record<string, any> = Object.create(null);
   const components = new SchemaComponents(options.schemas);
+  const operationIds = new Set<string>();
   await components.addNamed(options.schemas);
   const warnedSchemes = new Set<string>();
   warnAboutUndefinedSchemes(options.security, options.securitySchemes, warnedSchemes);
@@ -1997,7 +2027,21 @@ async function buildOpenApiSpec(
         }
       }
 
+      // Unique, as client generators need: a duplicate (two routes given the
+      // same id, or one documented under several paths) gets a number
+      let operationId = route.operationId ?? autoOperationId(route.method, openApiPath);
+      if (operationIds.has(operationId)) {
+        if (route.operationId) {
+          console.warn(`[express-typed-router] operationId "${operationId}" is used more than once; the docs number the others.`);
+        }
+        let n = 2;
+        while (operationIds.has(`${operationId}${n}`)) n++;
+        operationId = `${operationId}${n}`;
+      }
+      operationIds.add(operationId);
+
       const operation: Record<string, any> = {
+        operationId,
         summary: route.summary ?? autoSummary(route.method, docPath),
         tags: route.tags ?? [autoTag(docPath)],
         parameters,
@@ -3230,6 +3274,7 @@ export class TypedRouter<
       meta.responseSchema = options.responseSchema;
       meta.responses = options.responses;
       meta.security = options.security;
+      meta.operationId = options.operationId;
       meta.customValidationResponse = Boolean(
         options.hooks?.onBodyValidationFailure ||
           options.hooks?.onQueryValidationFailure ||

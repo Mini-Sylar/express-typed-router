@@ -413,6 +413,7 @@ app.use(
 - query and body schemas (from `querySchema` / `bodySchema`)
 - **response schemas** — inferred from real traffic (see [Response schemas](#response-schemas-from-live-traffic) below)
 - tags and summaries — inferred from route paths, or set manually
+- an `operationId` for each route, from its method and path (`GET /orders/:id` is `getOrdersById`), which client generators name their methods after; set `operationId` on a route for a friendlier one
 - authentication, per-status responses and shared `$ref` schemas, when you describe them (below)
 
 **Custom route metadata:**
