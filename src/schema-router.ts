@@ -2422,15 +2422,34 @@ async function buildOpenApiSpec(
         }
         responses[code] = response;
       }
-      // A route that validates its input can answer 400 with the library's own body
-      const validatesInput = route.bodySchema || route.querySchema || route.paramsSchema;
-      if (validatesInput && options.documentValidationErrors !== false && !responses["400"]) {
-        responses["400"] = route.customValidationResponse
-          ? { description: "The request failed validation" }
-          : {
-              description: "The request failed validation",
-              content: { "application/json": { schema: components.json("ValidationError", VALIDATION_ERROR_SCHEMA) } },
-            };
+      // A route that validates its input can answer 400 with the library's own body: as its only 400, or beside the
+      // route's own (a business rule broken, say), as either one
+      const validatesInput = route.bodySchema || route.querySchema || route.paramsSchema || route.headersSchema;
+      if (validatesInput && options.documentValidationErrors !== false && !route.customValidationResponse) {
+        const validationError = components.json("ValidationError", VALIDATION_ERROR_SCHEMA);
+        const own = responses["400"];
+        const ownJson = own?.content?.["application/json"]?.schema;
+        if (!own) {
+          responses["400"] = {
+            description: "The request failed validation",
+            content: { "application/json": { schema: validationError } },
+          };
+        } else if (ownJson && ownJson.$ref !== validationError.$ref) {
+          responses["400"] = {
+            ...own,
+            description: `${own.description}, or the request failed validation`,
+            content: { ...own.content, "application/json": { schema: { anyOf: [ownJson, validationError] } } },
+          };
+        } else if (!own.content) {
+          responses["400"] = {
+            ...own,
+            description: `${own.description}, or the request failed validation`,
+            content: { "application/json": { schema: validationError } },
+          };
+        }
+      } else if (validatesInput && options.documentValidationErrors !== false && !responses["400"]) {
+        // Its hooks answer validation failures themselves, in a shape the docs can't know
+        responses["400"] = { description: "The request failed validation" };
       }
       if (!Object.keys(responses).some((code) => Number(code) < 400)) {
         responses["200"] = { description: "Success" };
